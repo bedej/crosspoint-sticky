@@ -80,7 +80,7 @@ void AgentVoiceActivity::onEnter() {
   Activity::onEnter();
   g_voiceInstance = this;
   // Build marker — grep this in serial to confirm which binary is actually running.
-  LOG_INF("AVA", "voice build: pdm-pcm-fix + error-handling");
+  LOG_INF("AVA", "voice build: usb-pin-fix (mic on 19/20, no native USB)");
 
   if (!loadConfig()) {
     state_ = State::Error;
