@@ -63,4 +63,11 @@ class AgentVoiceActivity : public Activity {
   unsigned long lastRenderMs_ = 0;
 
   int16_t micBuf_[320];        // 20 ms @ 16 kHz mono
+
+  // Per-listen mic level stats (logged on stop) — near-zero => mic sent silence.
+  int16_t micPeak_ = 0;
+  uint64_t micAbsSum_ = 0;
+  uint32_t micCount_ = 0;
+  uint32_t bytesSent_ = 0;
+  uint32_t framesDropped_ = 0;  // mic frames read while WS not connected
 };

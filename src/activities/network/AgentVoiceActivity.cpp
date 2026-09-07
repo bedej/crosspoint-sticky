@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <HalStorage.h>
+#include <Logging.h>
 #include <WiFi.h>
 
 #include "WifiCredentialStore.h"
@@ -86,21 +87,29 @@ void AgentVoiceActivity::onEnter() {
     return;
   }
 
+  LOG_INF("AVA", "config host=%s port=%u tokenLen=%u", host_.c_str(), (unsigned)port_,
+          (unsigned)token_.length());
+
   connectWifi();
   if (WiFi.status() != WL_CONNECTED) {
+    LOG_ERR("AVA", "wifi connect failed (status=%d)", (int)WiFi.status());
     state_ = State::Error;
     status_ = "Wi-Fi failed. Set it up in File Transfer / Wi-Fi Networks.";
     requestUpdate();
     return;
   }
+  LOG_INF("AVA", "wifi ok ip=%s rssi=%d", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
   if (!mic_.begin(16000)) {
+    LOG_ERR("AVA", "mic begin failed");
     state_ = State::Error;
     status_ = "Mic init failed";
     requestUpdate();
     return;
   }
+  LOG_INF("AVA", "mic begin ok @16k, present=%d", (int)mic_.present());
 
   const std::string path = "/v1/stream?token=" + token_;
+  LOG_INF("AVA", "ws connecting %s:%u%s", host_.c_str(), (unsigned)port_, "/v1/stream");
   ws_.begin(host_.c_str(), port_, path.c_str());
   ws_.onEvent(wsTrampoline);
   ws_.setReconnectInterval(3000);
@@ -120,20 +129,40 @@ void AgentVoiceActivity::onExit() {
 
 void AgentVoiceActivity::pumpMic() {
   const int n = mic_.read(micBuf_, 320, 20);
-  if (n > 0 && wsConnected_) {
+  if (n <= 0) return;
+  for (int i = 0; i < n; i++) {
+    const int16_t v = micBuf_[i];
+    const int32_t a = v < 0 ? -static_cast<int32_t>(v) : v;
+    micAbsSum_ += static_cast<uint32_t>(a);
+    if (a > micPeak_) micPeak_ = static_cast<int16_t>(a);
+  }
+  micCount_ += static_cast<uint32_t>(n);
+  if (wsConnected_) {
     ws_.sendBIN(reinterpret_cast<uint8_t*>(micBuf_), static_cast<size_t>(n) * sizeof(int16_t));
+    bytesSent_ += static_cast<uint32_t>(n) * sizeof(int16_t);
+  } else {
+    framesDropped_++;
   }
 }
 
 void AgentVoiceActivity::startListening() {
   transcript_.clear();
   answer_.clear();
+  micPeak_ = 0;
+  micAbsSum_ = 0;
+  micCount_ = 0;
+  bytesSent_ = 0;
+  framesDropped_ = 0;
   state_ = State::Listening;
   status_ = "Listening... (Up to stop)";
+  LOG_INF("AVA", "listen start (ws=%d)", (int)wsConnected_);
   markDirty();
 }
 
 void AgentVoiceActivity::stopListening() {
+  const uint32_t avgAbs = micCount_ ? static_cast<uint32_t>(micAbsSum_ / micCount_) : 0;
+  LOG_INF("AVA", "listen end: samples=%u avgAbs=%u peak=%d bytesSent=%u dropped=%u ws=%d",
+          micCount_, avgAbs, (int)micPeak_, bytesSent_, framesDropped_, (int)wsConnected_);
   ws_.sendTXT("{\"type\":\"end\"}");
   state_ = State::Answering;
   status_ = "Thinking...";
@@ -173,10 +202,15 @@ void AgentVoiceActivity::onWsEvent(WStype_t type, uint8_t* payload, size_t len) 
   switch (type) {
     case WStype_CONNECTED:
       wsConnected_ = true;
+      LOG_INF("AVA", "ws connected");
       break;
     case WStype_DISCONNECTED:
+      wsConnected_ = false;
+      LOG_INF("AVA", "ws disconnected");
+      break;
     case WStype_ERROR:
       wsConnected_ = false;
+      LOG_ERR("AVA", "ws error");
       break;
     case WStype_TEXT:
       handleMessage(reinterpret_cast<const char*>(payload), len);
@@ -192,17 +226,20 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
   const char* t = doc["type"] | "";
   if (!strcmp(t, "partial") || !strcmp(t, "transcript")) {
     transcript_ = static_cast<const char*>(doc["text"] | "");
+    if (!strcmp(t, "transcript")) LOG_INF("AVA", "final transcript: '%s'", transcript_.c_str());
     markDirty();
   } else if (!strcmp(t, "answer.delta")) {
     answer_ += static_cast<const char*>(doc["text"] | "");
     markDirty();
   } else if (!strcmp(t, "answer.done")) {
+    LOG_INF("AVA", "answer.done answerLen=%u", (unsigned)answer_.length());
     state_ = State::Idle;
     status_ = "Press Up to talk  |  Down to exit";
     dirty_ = false;
     lastRenderMs_ = 0;
     requestUpdate(true);  // one clean full-ish refresh at the end
   } else if (!strcmp(t, "error")) {
+    LOG_ERR("AVA", "server error: %s", static_cast<const char*>(doc["message"] | ""));
     status_ = std::string("error: ") + static_cast<const char*>(doc["message"] | "");
     markDirty();
   }
