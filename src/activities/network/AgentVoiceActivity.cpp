@@ -106,7 +106,7 @@ void AgentVoiceActivity::onEnter() {
   ws_.setReconnectInterval(3000);
 
   state_ = State::Idle;
-  status_ = "Press AI-Voice to talk";
+  status_ = "Press Up to talk  |  Down to exit";
   requestUpdate();
 }
 
@@ -129,7 +129,7 @@ void AgentVoiceActivity::startListening() {
   transcript_.clear();
   answer_.clear();
   state_ = State::Listening;
-  status_ = "Listening... (press again to stop)";
+  status_ = "Listening... (Up to stop)";
   markDirty();
 }
 
@@ -144,16 +144,17 @@ void AgentVoiceActivity::loop() {
   ws_.loop();
   if (state_ == State::Listening) pumpMic();
 
-  // AI-Voice = the Power button (short press). A long hold sleeps the device
-  // globally (main.cpp) and never reaches here, so there's no power/talk ambiguity.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Power)) {
+  // The Sticky's AI-Voice button IS CrossPoint's Power button, which main.cpp consumes
+  // for sleep before an activity sees it — so push-to-talk uses the Up side button,
+  // and Down exits back to the menu.
+  if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     if (state_ == State::Idle || state_ == State::Answering) {
       startListening();
     } else if (state_ == State::Listening) {
       stopListening();
     }
   }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+  if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
     finish();
     return;
   }
@@ -197,7 +198,7 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     markDirty();
   } else if (!strcmp(t, "answer.done")) {
     state_ = State::Idle;
-    status_ = "Press AI-Voice to talk";
+    status_ = "Press Up to talk  |  Down to exit";
     dirty_ = false;
     lastRenderMs_ = 0;
     requestUpdate(true);  // one clean full-ish refresh at the end

@@ -47,8 +47,12 @@ writes the *inactive* app slot and reboots, with rollback if the image fails. Or
 CrossPoint's `OtaUpdater` at a URL hosting `firmware.bin`.
 
 ## Use it
-Home menu → **Voice Assistant** → press the **AI-Voice** button, speak, press again to
-stop → the transcript then the streamed answer appear on the e-paper. **Back** exits.
+Home menu → **Voice Assistant** → press **Up** to start, speak, press **Up** again to
+stop → the transcript then the streamed answer appear on the e-paper. **Down** exits.
+
+> The Sticky's **AI-Voice button is CrossPoint's Power button**, which the main loop
+> consumes for deep sleep before an activity can see it (default `shortPwrBtn=IGNORE`,
+> `main.cpp`). So push-to-talk is the **Up** side button, not AI-Voice.
 
 ## Building
 See **BUILD.md** — the key point is you must pin the pioarduino PlatformIO Core `v6.1.19`
