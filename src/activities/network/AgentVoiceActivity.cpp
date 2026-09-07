@@ -1,6 +1,7 @@
 #include "AgentVoiceActivity.h"
 
 #include <ArduinoJson.h>
+#include <HalStorage.h>
 #include <WiFi.h>
 
 #include "WifiCredentialStore.h"
@@ -8,13 +9,12 @@
 #include "fontIds.h"             // VERIFY include path (UI_10_FONT_ID)
 
 // ---- Endpoint config -------------------------------------------------------
-// SET THESE for your homelab. The token authorizes the device on the WS handshake
-// (VOICE_TOKEN in /opt/apps/voice/.env on blackbox). DO NOT commit the real token
-// to this (public) fork — this is a placeholder; prefer loading it from an SD
-// config file (like wifi.json) in a follow-up. See VOICE.md.
-static constexpr char VOICE_HOST[] = "192.168.1.85";
-static constexpr uint16_t VOICE_PORT = 18092;
-static constexpr char VOICE_TOKEN[] = "REPLACE_WITH_VOICE_TOKEN";
+// Read at runtime from /.crosspoint/voice.json on the SD card — NO secret is baked
+// into the firmware:  { "token": "<VOICE_TOKEN>", "host": "192.168.1.85", "port": 18092 }
+// `token` is required (the voice service's shared secret); host/port default below.
+static constexpr char VOICE_CONFIG_PATH[] = "/.crosspoint/voice.json";
+static constexpr char VOICE_HOST_DEFAULT[] = "192.168.1.85";
+static constexpr uint16_t VOICE_PORT_DEFAULT = 18092;
 
 // WebSocketsClient takes a C callback; bounce it to the live instance.
 static AgentVoiceActivity* g_voiceInstance = nullptr;
@@ -55,9 +55,36 @@ void AgentVoiceActivity::connectWifi() {
   }
 }
 
+bool AgentVoiceActivity::loadConfig() {
+  host_ = VOICE_HOST_DEFAULT;
+  port_ = VOICE_PORT_DEFAULT;
+  token_.clear();
+  HalFile file;
+  if (!Storage.openFileForRead("VOICE", VOICE_CONFIG_PATH, file) || !file) return false;
+  const size_t n = file.size();
+  if (n == 0 || n > 4096) return false;
+  std::string buf;
+  buf.resize(n);
+  const int got = file.read(&buf[0], n);
+  if (got <= 0) return false;
+  JsonDocument doc;
+  if (deserializeJson(doc, buf.c_str(), static_cast<size_t>(got))) return false;
+  token_ = static_cast<const char*>(doc["token"] | "");
+  host_ = static_cast<const char*>(doc["host"] | VOICE_HOST_DEFAULT);
+  port_ = static_cast<uint16_t>(doc["port"] | VOICE_PORT_DEFAULT);
+  return !token_.empty();
+}
+
 void AgentVoiceActivity::onEnter() {
   Activity::onEnter();
   g_voiceInstance = this;
+
+  if (!loadConfig()) {
+    state_ = State::Error;
+    status_ = "Add /.crosspoint/voice.json with a \"token\" (see VOICE.md).";
+    requestUpdate();
+    return;
+  }
 
   connectWifi();
   if (WiFi.status() != WL_CONNECTED) {
@@ -73,8 +100,8 @@ void AgentVoiceActivity::onEnter() {
     return;
   }
 
-  const String path = String("/v1/stream?token=") + VOICE_TOKEN;
-  ws_.begin(VOICE_HOST, VOICE_PORT, path.c_str());
+  const std::string path = "/v1/stream?token=" + token_;
+  ws_.begin(host_.c_str(), port_, path.c_str());
   ws_.onEvent(wsTrampoline);
   ws_.setReconnectInterval(3000);
 

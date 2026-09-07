@@ -39,12 +39,17 @@ class AgentVoiceActivity : public Activity {
  private:
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
+  bool loadConfig();           // token/host/port from /.crosspoint/voice.json (SD)
   void connectWifi();          // STA from saved creds
   void startListening();
   void stopListening();        // sends {"type":"end"}
   void pumpMic();              // read frames -> ws.sendBIN while Listening
   void handleMessage(const char* json, size_t len);
   void markDirty();            // throttled requestUpdate()
+
+  std::string token_;          // shared secret, from SD config — never baked in
+  std::string host_;
+  uint16_t port_ = 18092;
 
   freeink::Microphone mic_;
   WebSocketsClient ws_;
