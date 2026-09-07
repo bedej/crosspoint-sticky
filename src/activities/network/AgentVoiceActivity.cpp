@@ -79,6 +79,8 @@ bool AgentVoiceActivity::loadConfig() {
 void AgentVoiceActivity::onEnter() {
   Activity::onEnter();
   g_voiceInstance = this;
+  // Build marker — grep this in serial to confirm which binary is actually running.
+  LOG_INF("AVA", "voice build: pdm-pcm-fix + error-handling");
 
   if (!loadConfig()) {
     state_ = State::Error;
@@ -166,6 +168,7 @@ void AgentVoiceActivity::stopListening() {
   ws_.sendTXT("{\"type\":\"end\"}");
   state_ = State::Answering;
   status_ = "Thinking...";
+  lastServerMs_ = millis();  // arm the stall watchdog
   markDirty();
 }
 
@@ -188,6 +191,16 @@ void AgentVoiceActivity::loop() {
     return;
   }
 
+  // Stall watchdog: if a turn goes quiet (WS dropped, or ASR/Hermes returned
+  // nothing) surface an error instead of hanging on "Thinking...".
+  if (state_ == State::Answering && millis() - lastServerMs_ > kStallTimeoutMs) {
+    LOG_ERR("AVA", "answer stalled >%lums, resetting", kStallTimeoutMs);
+    state_ = State::Idle;
+    status_ = "No response. Press Up to try again.";
+    requestUpdate(true);
+    return;
+  }
+
   // E-paper is slow and ghosts — never repaint per answer.delta. Coalesce to ~400 ms.
   if (dirty_ && millis() - lastRenderMs_ > 400) {
     dirty_ = false;
@@ -198,6 +211,14 @@ void AgentVoiceActivity::loop() {
 
 void AgentVoiceActivity::markDirty() { dirty_ = true; }
 
+void AgentVoiceActivity::failTurnIfInFlight(const char* msg) {
+  if (state_ == State::Listening || state_ == State::Answering) {
+    state_ = State::Idle;
+    status_ = msg;
+    requestUpdate(true);
+  }
+}
+
 void AgentVoiceActivity::onWsEvent(WStype_t type, uint8_t* payload, size_t len) {
   switch (type) {
     case WStype_CONNECTED:
@@ -207,10 +228,12 @@ void AgentVoiceActivity::onWsEvent(WStype_t type, uint8_t* payload, size_t len) 
     case WStype_DISCONNECTED:
       wsConnected_ = false;
       LOG_INF("AVA", "ws disconnected");
+      failTurnIfInFlight("Connection lost. Press Up to try again.");
       break;
     case WStype_ERROR:
       wsConnected_ = false;
       LOG_ERR("AVA", "ws error");
+      failTurnIfInFlight("Connection error. Press Up to try again.");
       break;
     case WStype_TEXT:
       handleMessage(reinterpret_cast<const char*>(payload), len);
@@ -224,6 +247,7 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
   JsonDocument doc;
   if (deserializeJson(doc, json, len)) return;  // ignore malformed frames
   const char* t = doc["type"] | "";
+  lastServerMs_ = millis();  // any server frame keeps the stall watchdog alive
   if (!strcmp(t, "partial") || !strcmp(t, "transcript")) {
     transcript_ = static_cast<const char*>(doc["text"] | "");
     if (!strcmp(t, "transcript")) LOG_INF("AVA", "final transcript: '%s'", transcript_.c_str());
@@ -240,8 +264,9 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     requestUpdate(true);  // one clean full-ish refresh at the end
   } else if (!strcmp(t, "error")) {
     LOG_ERR("AVA", "server error: %s", static_cast<const char*>(doc["message"] | ""));
-    status_ = std::string("error: ") + static_cast<const char*>(doc["message"] | "");
-    markDirty();
+    state_ = State::Idle;  // don't strand the user in "Thinking..."
+    status_ = std::string("Error: ") + static_cast<const char*>(doc["message"] | "");
+    requestUpdate(true);
   }
 }
 

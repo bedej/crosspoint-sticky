@@ -46,6 +46,7 @@ class AgentVoiceActivity : public Activity {
   void pumpMic();              // read frames -> ws.sendBIN while Listening
   void handleMessage(const char* json, size_t len);
   void markDirty();            // throttled requestUpdate()
+  void failTurnIfInFlight(const char* msg);  // Listening/Answering -> Idle + error
 
   std::string token_;          // shared secret, from SD config — never baked in
   std::string host_;
@@ -61,6 +62,11 @@ class AgentVoiceActivity : public Activity {
   std::string answer_;         // accumulated answer.delta text
   bool dirty_ = false;
   unsigned long lastRenderMs_ = 0;
+  // Stall watchdog: last time any server frame arrived while a turn is in flight.
+  // If Thinking/Answering goes quiet past kStallTimeoutMs, surface an error instead
+  // of hanging. Reset by every partial/delta so a slow streaming answer isn't cut off.
+  unsigned long lastServerMs_ = 0;
+  static constexpr unsigned long kStallTimeoutMs = 15000;
 
   int16_t micBuf_[320];        // 20 ms @ 16 kHz mono
 
