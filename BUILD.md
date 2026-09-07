@@ -1,68 +1,64 @@
-# Building the Sticky firmware (`[env:sticky]`) — recipe + the SCons blocker
+# Building the Sticky firmware (`[env:sticky]`)
 
-You do **not** need the hardware to *compile* (only to flash). This documents how to
-build in a container, and the one toolchain bug that currently blocks a clean compile.
+You do **not** need the hardware to *compile* (only to flash). CrossPoint builds with
+the **pioarduino fork of PlatformIO Core, pinned to `v6.1.19`** — mainline
+`pip install platformio` is currently broken (see the blocker below), so use the pin.
 
-## Container build recipe (no hardware)
-
-On a machine with Docker + internet (e.g. blackbox):
+## Recipe (no hardware; verified on devser)
 
 ```bash
-# 1. get the source (this fork, recursively — freeink-sdk is a nested submodule)
-git clone --rectree ... # or rsync an already-checked-out tree, incl. freeink-sdk/
-#    rsync -a --exclude .git <checkout>/ host:/tmp/sticky-build/
+# PlatformIO in an isolated venv, pinned to the pioarduino Core v6.1.19 (what CrossPoint CI uses)
+python3 -m venv ~/pioenv                    # needs python3-venv/ensurepip installed
+~/pioenv/bin/pip install -U "https://github.com/pioarduino/platformio-core/archive/refs/tags/v6.1.19.zip"
 
-# 2. build in a PlatformIO container, caching the toolchain in a named volume
-docker volume create pio_home
-docker run --rm -v /tmp/sticky-build:/proj -v pio_home:/root/.platformio -w /proj \
-  python:3.12-slim bash -c '
-    apt-get update -qq && apt-get install -y -qq git >/dev/null
-    pip install -q platformio
-    pio run -e sticky'
+# build (the tree must include the freeink-sdk submodule)
+~/pioenv/bin/pio run -d <path-to>/sticky-fw -e sticky
+# flash (needs the device): ~/pioenv/bin/pio run -d ... -e sticky -t upload
 ```
 
-First run downloads the pioarduino platform + ESP-IDF toolchain + rebuilds the Arduino
-core (slow, ~10-20 min; cached in `pio_home` after). `AgentVoiceActivity.cpp` compiles
-as part of this once the blocker below is resolved.
+First run downloads the pioarduino platform (`55.03.311`) + ESP-IDF toolchain and
+rebuilds the Arduino core once (slow, ~15-20 min; cached in `~/.platformio` after).
+The build is long — run it detached (`setsid`/`nohup`) if your shell has a runtime cap.
 
-## ⚠ The blocker: SCons 4.11 removed `SCons.Tool.FortranCommon`
+## ⚠ The blocker mainline PlatformIO hits (why the pin matters)
 
-Right now `pio run -e sticky` fails in ~11-20 s, **before compiling any source**, with:
+`pip install platformio` (unpinned) fails in ~15 s, **before compiling any source**, with:
 
 ```
 *** [.pio/build/sticky/firmware.elf] ModuleNotFoundError : No module named 'SCons.Tool.FortranCommon'
   File ".../packages/tool-scons/scons-local-4.11.1/SCons/Tool/linkCommon/__init__.py", line 132, in smart_link
 ```
 
-**Root cause.** PlatformIO builds with its **own vendored SCons**, downloaded to
-`~/.platformio/packages/tool-scons/scons-local-4.11.1/` — a 4.11-era SCons that
-**dropped the `FortranCommon` module**, while that same SCons's `linkCommon`/`fortran`
-still `import`s it. So SCons dies during build-environment setup. **This is a
-PlatformIO + SCons-4.11 packaging incompatibility, not a firmware bug** — no source is
-ever compiled.
+**Root cause (dependency drift, not the firmware).** PlatformIO Core **6.2.0** shipped to
+PyPI **2026-09-05**; it resolves `platformio/tool-scons@4.41101.0` = **SCons 4.11.1**,
+which removed the `SCons.Tool.FortranCommon` module (refactored into
+`SCons.Tool.linkCommon` in SCons 4.9). The pioarduino platform pins the *good*
+`tool-scons@4.40801.0` = SCons 4.8.1 (still has `FortranCommon`), but Core installs
+**both** and the newer one wins → the S3/ESP-IDF builder imports a module that no longer
+exists and dies at the `firmware.elf` link step. Clean envs (CI, fresh installs,
+throwaway containers) hit it; a machine that already cached the good SCons does not.
 
-**Dead ends (documented so nobody repeats them):**
-- Pinning/patching SCons in the container or in `~/.platformio/penv` — *irrelevant*; the
-  build uses the **vendored** `tool-scons`, not those.
-- Copying `FortranCommon.py` into `.../tool-scons/scons-local-4.11.1/SCons/Tool/` — the
-  patch lands, but `pio run` **re-materializes tool-scons** each run and clobbers it.
+**tool-scons → SCons map:** `4.40801.0`=4.8.1 ✅ · `4.41101.0`=4.11.1 ❌ · `<4.409xx`=safe.
 
-**The fix (apply in a real pioarduino dev env, then compile-verify):** force a
-`tool-scons` whose bundled SCons is **< 4.9** (which still has `FortranCommon`). Options,
-in order of preference:
-1. Pin it in the `[env:sticky]` (or a base env) `platform_packages`, e.g.
-   `platform_packages = platformio/tool-scons@<version bundling scons<4.9>` — find the
-   version from `pio pkg show platformio/tool-scons` / the registry.
-2. Use a PlatformIO **core** version old enough that its `tool-scons` predates SCons 4.9.
-3. If patching the vendored SCons, make it survive re-extraction (e.g. pin the package so
-   `pio` treats it as satisfied and won't re-fetch), then drop `FortranCommon.py` in.
+**The fix — any of (confirmed against CrossPoint CI + multiple PRs):**
+1. **Pin Core to pioarduino v6.1.19** (recipe above) — most robust; matches CrossPoint.
+2. **Mainline PyPI:** `pip install "platformio==6.1.19"` (resolves the good tool-scons).
+3. **Pin in `platformio.ini`** (works with any Core) — add to `[env:sticky]` (or a base):
+   ```ini
+   platform_packages = platformio/tool-scons@4.40801.0
+   ```
+4. If a machine already pulled the bad one, purge it so the pin takes effect:
+   `rm -rf ~/.platformio/packages/tool-scons@4.41101.0` (or `rm -rf ~/.platformio`).
 
-Once `pio run -e sticky` gets past SCons, `AgentVoiceActivity.cpp` will compile and any
-real errors (the `// VERIFY` renderer/UITheme signatures noted in VOICE.md) surface —
-fix those against the local headers, then `-t upload` to flash.
+**Dead ends (don't repeat):** patching/pinning the *pip/venv* SCons does nothing — the
+build uses PlatformIO's **vendored** `tool-scons`; and patching that vendored copy gets
+re-materialized away on the next `pio run`. Fix the *version*, per above.
 
 ## Status
-- Backend the firmware talks to (`voice` service, ASR, Hermes, LAN+token endpoint): live,
-  tested, reproducible from homelab `main`.
-- Firmware (`AgentVoiceActivity`): written against the SDK APIs, **not yet compile-verified**
-  because of the SCons blocker above (environmental, pre-compilation).
+- **`AgentVoiceActivity` COMPILE-VERIFIED** with the pin above (`pio run -e sticky` →
+  `[SUCCESS]`, Flash 80.4% / RAM 20.3%). Every `// VERIFY` renderer/UITheme/font/refresh
+  API was correct; the only fix was one Wi-Fi type (`std::string ssid`, not `String`).
+- Backend it talks to (`voice` service: ASR + Hermes + LAN+token endpoint): live, tested,
+  reproducible from homelab `main`.
+- **Remaining (not yet done):** wire the activity into a launcher (the 3-file menu edit in
+  VOICE.md — touches core UI files + i18n), then `-t upload` to flash and test on the device.

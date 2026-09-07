@@ -35,7 +35,7 @@ void AgentVoiceActivity::connectWifi() {
   // VERIFY: WifiSelectionActivity holds a RenderLock around loadFromFile() because
   // the SD card and the e-paper share the SPI bus. Mirror that if you see SPI races.
   WIFI_STORE.loadFromFile();
-  String ssid = WIFI_STORE.getLastConnectedSsid();
+  std::string ssid = WIFI_STORE.getLastConnectedSsid();
   auto cred = WIFI_STORE.findCredential(ssid);  // std::optional<WifiCredential>
 
   WiFi.persistent(false);

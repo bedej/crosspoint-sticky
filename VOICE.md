@@ -11,10 +11,11 @@ AI-Voice button ─▶ PDM mic (freeink::Microphone, 16 kHz) ─▶ WebSocket (b
 The backend (ASR + Hermes + streaming) is live and tested at
 `ws://192.168.1.85:18092/v1/stream?token=<VOICE_TOKEN>` (LAN-only, token-authed).
 
-> **Status: FIRST DRAFT — not yet built or flashed.** `AgentVoiceActivity.{h,cpp}`
-> is written against the SDK APIs (`freeink::Microphone`, `WebSocketsClient`,
-> `WifiCredentialStore`) but has **not been compiled**. Expect to fix the lines
-> marked `// VERIFY` (renderer/UITheme/font-id signatures) on the first `pio run`.
+> **Status: COMPILE-VERIFIED, not yet flashed.** `AgentVoiceActivity.{h,cpp}` builds clean
+> with `pio run -e sticky` (see BUILD.md for the required Core pin). The `// VERIFY` SDK
+> API guesses (renderer/UITheme/font/refresh) all compiled as-is; the only fix needed was
+> one Wi-Fi type (`std::string ssid`). **Not yet wired into a launcher and not flashed** —
+> do the menu wire-in below, then `-t upload` and test on the device.
 
 ## What's already handled
 - **WebSocket client**: `links2004/WebSockets @ 2.7.3` is already in `lib_deps`
