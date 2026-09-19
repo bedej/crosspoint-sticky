@@ -11,11 +11,10 @@
 // the local headers on the first `pio run -e sticky`. See VOICE.md.
 
 #include <Arduino.h>
+#include <Microphone.h>
 #include <WebSocketsClient.h>
 
 #include <string>
-
-#include <Microphone.h>
 
 #include "activities/Activity.h"
 
@@ -27,6 +26,9 @@ class AgentVoiceActivity : public Activity {
   void onEnter() override;
   void onExit() override;
   void loop() override;
+
+  // Serial "CMD:PTT" (dev/test harness): toggle talk as if Up were pressed.
+  static void requestPushToTalk() { pttRequested_ = true; }
   void render(RenderLock&&) override;
 
   // Keep the device awake and the loop hot while a conversation is live.
@@ -37,18 +39,20 @@ class AgentVoiceActivity : public Activity {
   void onWsEvent(WStype_t type, uint8_t* payload, size_t len);
 
  private:
+  static inline volatile bool pttRequested_ = false;
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
-  bool loadConfig();           // token/host/port from /.crosspoint/voice.json (SD)
-  void connectWifi();          // STA from saved creds
+  bool loadConfig();   // token/host/port from /.crosspoint/voice.json (SD)
+  void connectWifi();  // STA from saved creds
   void startListening();
-  void stopListening();        // sends {"type":"end"}
-  void pumpMic();              // read frames -> ws.sendBIN while Listening
+  void stopListening();  // sends {"type":"end"}
+  void pumpMic();        // read frames -> ws.sendBIN while Listening
   void handleMessage(const char* json, size_t len);
-  void markDirty();            // throttled requestUpdate()
+  void markDirty();  // throttled requestUpdate()
+  void finishAnswer();
   void failTurnIfInFlight(const char* msg);  // Listening/Answering -> Idle + error
 
-  std::string token_;          // shared secret, from SD config — never baked in
+  std::string token_;  // shared secret, from SD config — never baked in
   std::string host_;
   uint16_t port_ = 18092;
 
@@ -57,9 +61,9 @@ class AgentVoiceActivity : public Activity {
   bool wsConnected_ = false;
 
   State state_ = State::Connecting;
-  std::string status_;         // one-line status/header
-  std::string transcript_;     // latest ASR text (partial/final)
-  std::string answer_;         // accumulated answer.delta text
+  std::string status_;      // one-line status/header
+  std::string transcript_;  // latest ASR text (partial/final)
+  std::string answer_;      // accumulated answer.delta text
   bool dirty_ = false;
   unsigned long lastRenderMs_ = 0;
   // Stall watchdog: last time any server frame arrived while a turn is in flight.
@@ -68,7 +72,7 @@ class AgentVoiceActivity : public Activity {
   unsigned long lastServerMs_ = 0;
   static constexpr unsigned long kStallTimeoutMs = 15000;
 
-  int16_t micBuf_[320];        // 20 ms @ 16 kHz mono
+  int16_t micBuf_[320];  // 20 ms @ 16 kHz mono
 
   // Per-listen mic level stats (logged on stop) — near-zero => mic sent silence.
   int16_t micPeak_ = 0;

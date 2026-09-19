@@ -265,6 +265,11 @@ bool HalGPIO::coldBootImpliesPowerButton() const {
   // post-flash boots as battery button boots, and STAT-only boards like the
   // EEGO A4 misread them the same way once the charger terminates at 100%
   // (STAT inactive reads as "no USB").
+#if defined(CROSSPOINT_WAIT_FOR_USB_SERIAL)
+  // Sticky dev builds: its UART bridge's RTS reset (flash, monitor attach) is a
+  // POWERON that a full battery can't tell from a button boot, so always boot.
+  if (BoardConfig::isSticky()) return false;
+#endif
   return isXteinkDevice() || BoardConfig::isPaperMono() || BoardConfig::isSticky();
 }
 

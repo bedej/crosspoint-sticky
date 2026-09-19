@@ -89,8 +89,7 @@ void AgentVoiceActivity::onEnter() {
     return;
   }
 
-  LOG_INF("AVA", "config host=%s port=%u tokenLen=%u", host_.c_str(), (unsigned)port_,
-          (unsigned)token_.length());
+  LOG_INF("AVA", "config host=%s port=%u tokenLen=%u", host_.c_str(), (unsigned)port_, (unsigned)token_.length());
 
   connectWifi();
   if (WiFi.status() != WL_CONNECTED) {
@@ -163,8 +162,8 @@ void AgentVoiceActivity::startListening() {
 
 void AgentVoiceActivity::stopListening() {
   const uint32_t avgAbs = micCount_ ? static_cast<uint32_t>(micAbsSum_ / micCount_) : 0;
-  LOG_INF("AVA", "listen end: samples=%u avgAbs=%u peak=%d bytesSent=%u dropped=%u ws=%d",
-          micCount_, avgAbs, (int)micPeak_, bytesSent_, framesDropped_, (int)wsConnected_);
+  LOG_INF("AVA", "listen end: samples=%u avgAbs=%u peak=%d bytesSent=%u dropped=%u ws=%d", micCount_, avgAbs,
+          (int)micPeak_, bytesSent_, framesDropped_, (int)wsConnected_);
   ws_.sendTXT("{\"type\":\"end\"}");
   state_ = State::Answering;
   status_ = "Thinking...";
@@ -179,7 +178,9 @@ void AgentVoiceActivity::loop() {
   // The Sticky's AI-Voice button IS CrossPoint's Power button, which main.cpp consumes
   // for sleep before an activity sees it — so push-to-talk uses the Up side button,
   // and Down exits back to the menu.
-  if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+  const bool pttSerial = pttRequested_;
+  pttRequested_ = false;
+  if (pttSerial || mappedInput.wasReleased(MappedInputManager::Button::Up)) {
     if (state_ == State::Idle || state_ == State::Answering) {
       startListening();
     } else if (state_ == State::Listening) {
@@ -211,7 +212,22 @@ void AgentVoiceActivity::loop() {
 
 void AgentVoiceActivity::markDirty() { dirty_ = true; }
 
+void AgentVoiceActivity::finishAnswer() {
+  state_ = State::Idle;
+  status_ = "Press Up to talk  |  Down to exit";
+  dirty_ = false;
+  lastRenderMs_ = 0;
+  requestUpdate(true);  // one clean full-ish refresh at the end
+}
+
 void AgentVoiceActivity::failTurnIfInFlight(const char* msg) {
+  // The server closes right after answer.done, and the close can overtake it;
+  // an answer already streamed in means the turn completed.
+  if (state_ == State::Answering && !answer_.empty()) {
+    LOG_INF("AVA", "closed after answer (answerLen=%u), treating as done", (unsigned)answer_.length());
+    finishAnswer();
+    return;
+  }
   if (state_ == State::Listening || state_ == State::Answering) {
     state_ = State::Idle;
     status_ = msg;
@@ -227,7 +243,7 @@ void AgentVoiceActivity::onWsEvent(WStype_t type, uint8_t* payload, size_t len) 
       break;
     case WStype_DISCONNECTED:
       wsConnected_ = false;
-      LOG_INF("AVA", "ws disconnected");
+      LOG_INF("AVA", "ws disconnected (state=%d answerLen=%u)", (int)state_, (unsigned)answer_.length());
       failTurnIfInFlight("Connection lost. Press Up to try again.");
       break;
     case WStype_ERROR:
@@ -245,8 +261,12 @@ void AgentVoiceActivity::onWsEvent(WStype_t type, uint8_t* payload, size_t len) 
 
 void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
   JsonDocument doc;
-  if (deserializeJson(doc, json, len)) return;  // ignore malformed frames
+  if (const auto err = deserializeJson(doc, json, len)) {
+    LOG_ERR("AVA", "bad ws frame (%s) len=%u", err.c_str(), (unsigned)len);
+    return;
+  }
   const char* t = doc["type"] | "";
+  LOG_DBG("AVA", "ws rx type=%s len=%u state=%d", t, (unsigned)len, (int)state_);
   lastServerMs_ = millis();  // any server frame keeps the stall watchdog alive
   if (!strcmp(t, "partial") || !strcmp(t, "transcript")) {
     transcript_ = static_cast<const char*>(doc["text"] | "");
@@ -257,11 +277,7 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     markDirty();
   } else if (!strcmp(t, "answer.done")) {
     LOG_INF("AVA", "answer.done answerLen=%u", (unsigned)answer_.length());
-    state_ = State::Idle;
-    status_ = "Press Up to talk  |  Down to exit";
-    dirty_ = false;
-    lastRenderMs_ = 0;
-    requestUpdate(true);  // one clean full-ish refresh at the end
+    finishAnswer();
   } else if (!strcmp(t, "error")) {
     LOG_ERR("AVA", "server error: %s", static_cast<const char*>(doc["message"] | ""));
     state_ = State::Idle;  // don't strand the user in "Thinking..."
@@ -271,20 +287,28 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
 }
 
 void AgentVoiceActivity::render(RenderLock&&) {
-  // VERIFY every renderer/UITheme call + font id + Rect + refresh enum against the
-  // local headers (GfxRenderer.h, components/UITheme.h, fontIds.h) on first build.
   renderer.clearScreen();
-  int y = 8;
-  renderer.drawText(UI_10_FONT_ID, 8, y, status_.c_str());
-  y += renderer.getLineHeight(UI_10_FONT_ID) + 6;
+  const int w = renderer.getScreenWidth();
+  const int h = renderer.getScreenHeight();
+  const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
+  constexpr int kMargin = 8;
+  int y = kMargin;
+  for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, status_.c_str(), w - 2 * kMargin, 2)) {
+    renderer.drawText(UI_10_FONT_ID, kMargin, y, line.c_str());
+    y += lineH;
+  }
+  y += 6;
   if (!transcript_.empty()) {
     const std::string you = "You: " + transcript_;
-    renderer.drawText(UI_10_FONT_ID, 8, y, you.c_str());
-    y += renderer.getLineHeight(UI_10_FONT_ID) + 6;
+    for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, you.c_str(), w - 2 * kMargin, 4)) {
+      renderer.drawText(UI_10_FONT_ID, kMargin, y, line.c_str());
+      y += lineH;
+    }
+    y += 6;
   }
-  if (!answer_.empty()) {
-    Rect area{8, y, 800 - 16, 480 - y - 8};  // Sticky panel is 800x480
-    UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, answer_.c_str(), 24);
+  if (!answer_.empty() && y < h - kMargin) {
+    Rect area{kMargin, y, w - 2 * kMargin, h - y - kMargin};
+    UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, answer_.c_str(), (h - y) / lineH);
   }
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }

@@ -33,10 +33,12 @@
 #include "SdCardFontSystem.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/network/AgentVoiceActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "platform/MicSelftest.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
@@ -356,6 +358,10 @@ void setup() {
 #endif
 #endif
 
+#ifdef VOICE_MIC_SELFTEST
+  runMicSelftest();
+#endif
+
   HalSystem::begin();
   // checkPanic() clears the watchdog capture marker after a successful SD
   // dump, so retain the boot classification for the later activity route.
@@ -450,7 +456,10 @@ void setup() {
     case HalGPIO::WakeupReason::AfterUSBPower:
       // Most devices return to sleep after a USB-powered cold boot.
       LOG_DBG("MAIN", "Wakeup reason: After USB Power");
-#if FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_PAPERMONO || FREEINK_DEVICE_EEGO_A4
+#if FREEINK_DEVICE_X4PRO || FREEINK_DEVICE_X4CLASSIC || FREEINK_DEVICE_PAPERMONO || FREEINK_DEVICE_EEGO_A4 || \
+    (FREEINK_DEVICE_STICKY && defined(CROSSPOINT_WAIT_FOR_USB_SERIAL))
+      // Sticky dev builds: the UART bridge's RTS reset (flash, monitor attach)
+      // also reads as POWERON, so stay awake for the flash-and-test loop.
       // X4 Pro must stay awake so USB Serial/JTAG remains available after leaving
       // USB Drive and reconnecting the cable. Paper Mono has no armable GPIO wake
       // (its button is behind the PMIC). EEGO A4's post-flash reset reads as
@@ -623,6 +632,10 @@ void loop() {
         uint8_t* buf = display.getFrameBuffer();
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
+      } else if (cmd == "VOICE") {
+        activityManager.goToVoice();
+      } else if (cmd == "PTT") {
+        AgentVoiceActivity::requestPushToTalk();
       }
     }
   }
