@@ -19,6 +19,7 @@
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
 #include <driver/gpio.h>
+#include <soc/rtc_cntl_reg.h>
 #if FREEINK_CAP_TOUCH
 #include <esp_sntp.h>
 #endif
@@ -639,6 +640,16 @@ void loop() {
         uint8_t* buf = display.getFrameBuffer();
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
+      } else if (cmd == "DOWNLOAD") {
+        // Reboot into the ROM serial bootloader. The Sticky's GPIO0 doubles as
+        // the sensor I2C clock, so the USB bridge's boot-strap pull cannot win
+        // against the running app and auto-reset flashing is unreliable; this
+        // forces download boot in software instead.
+        logSerial.printf("DOWNLOAD_BOOT\n");
+        logSerial.flush();
+        delay(50);
+        REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+        esp_restart();
       } else if (cmd == "VOICE") {
         activityManager.goToVoice();
       } else if (cmd == "PTT") {

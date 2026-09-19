@@ -48,7 +48,8 @@ class AgentVoiceActivity : public Activity {
   void stopListening();  // sends {"type":"end"}
   void pumpMic();        // read frames -> ws.sendBIN while Listening
   void handleMessage(const char* json, size_t len);
-  void markDirty();  // throttled requestUpdate()
+  void markDirty();                         // throttled requestUpdate()
+  void appendAnswerText(const char* text);  // Markdown-stripped append
   void finishAnswer();
   void failTurnIfInFlight(const char* msg);  // Listening/Answering -> Idle + error
 

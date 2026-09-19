@@ -245,6 +245,22 @@ void AgentVoiceActivity::loop() {
 
 void AgentVoiceActivity::markDirty() { dirty_ = true; }
 
+void AgentVoiceActivity::appendAnswerText(const char* text) {
+  // Hermes answers in Markdown; e-paper has one face and no styling, so the
+  // emphasis/code runs would render as literal **asterisks**. Strip the inline
+  // markers as deltas arrive (they never split mid-marker in practice, and a
+  // stray single char is harmless).
+  for (const char* p = text; *p; ++p) {
+    if (*p == '`') continue;
+    if (*p == '*' && (p[1] == '*' || (p != text && p[-1] == '*'))) continue;
+    if (*p == '_' && p[1] == '_') {
+      ++p;
+      continue;
+    }
+    answer_ += *p;
+  }
+}
+
 void AgentVoiceActivity::finishAnswer() {
   state_ = State::Idle;
   status_ = "Press Up to talk  |  Down to exit";
@@ -315,7 +331,7 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     }
     markDirty();
   } else if (!strcmp(t, "answer.delta")) {
-    answer_ += static_cast<const char*>(doc["text"] | "");
+    appendAnswerText(static_cast<const char*>(doc["text"] | ""));
     markDirty();
   } else if (!strcmp(t, "answer.done")) {
     LOG_INF("AVA", "answer.done answerLen=%u", (unsigned)answer_.length());
@@ -334,23 +350,28 @@ void AgentVoiceActivity::render(RenderLock&&) {
   const int h = renderer.getScreenHeight();
   const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
   constexpr int kMargin = 8;
+  const int textW = w - 2 * kMargin;
+
+  // Everything is left-aligned and laid out top-down from a fixed origin, so a
+  // streaming answer only ever appends lines — the status and the transcript
+  // above it keep their position instead of being re-flowed on every delta.
   int y = kMargin;
-  for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, status_.c_str(), w - 2 * kMargin, 2)) {
-    renderer.drawText(UI_10_FONT_ID, kMargin, y, line.c_str());
-    y += lineH;
-  }
-  y += 6;
-  if (!transcript_.empty()) {
-    const std::string you = "You: " + transcript_;
-    for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, you.c_str(), w - 2 * kMargin, 4)) {
+  const auto drawBlock = [&](const char* text, int maxLines) {
+    for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, text, textW, maxLines)) {
+      if (y > h - kMargin - lineH) return;
       renderer.drawText(UI_10_FONT_ID, kMargin, y, line.c_str());
       y += lineH;
     }
-    y += 6;
+  };
+
+  drawBlock(status_.c_str(), 2);
+  if (!transcript_.empty()) {
+    y += lineH;  // blank line between the status/question and what follows
+    drawBlock(("You: " + transcript_).c_str(), 4);
   }
-  if (!answer_.empty() && y < h - kMargin) {
-    Rect area{kMargin, y, w - 2 * kMargin, h - y - kMargin};
-    UITheme::drawCenteredWrappedText(renderer, area, UI_10_FONT_ID, answer_.c_str(), (h - y) / lineH);
+  if (!answer_.empty()) {
+    y += lineH;  // blank line separating the question from the answer
+    drawBlock(answer_.c_str(), (h - kMargin - y) / lineH);
   }
   renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }
