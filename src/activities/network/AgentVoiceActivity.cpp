@@ -149,13 +149,16 @@ void AgentVoiceActivity::pumpMic() {
   // few hundred LSB above it, which ASR hears as silence. One-pole DC blocker,
   // then a fixed gain with saturation, before anything measures or sends it.
   if (!dcPrimed_) {
-    dcState_ = micBuf_[0];
+    dcState_ = static_cast<int32_t>(micBuf_[0]) << kDcFrac;
     dcPrimed_ = true;
   }
   for (int i = 0; i < n; i++) {
     const int32_t x = micBuf_[i];
-    dcState_ += (x - dcState_) >> kDcShift;
-    const int32_t ac = (x - dcState_) * kMicGain;
+    // dcState_ is Q<kDcFrac>: tracking the offset at sub-LSB resolution keeps the
+    // integer shift from stalling while still short of it — a leftover offset
+    // would be amplified with the signal and eat the headroom.
+    dcState_ += ((x << kDcFrac) - dcState_) >> kDcShift;
+    const int32_t ac = (x - (dcState_ >> kDcFrac)) * kMicGain;
     micBuf_[i] = static_cast<int16_t>(ac > 32767 ? 32767 : (ac < -32768 ? -32768 : ac));
   }
   for (int i = 0; i < n; i++) {

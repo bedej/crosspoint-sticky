@@ -76,6 +76,7 @@ class AgentVoiceActivity : public Activity {
   // Mic conditioning: DC blocker state (1/2^kDcShift per sample ~= 8 Hz corner
   // at 16 kHz) and the fixed make-up gain applied before streaming.
   static constexpr int kDcShift = 9;
+  static constexpr int kDcFrac = 8;  // fixed-point bits below the LSB in dcState_
   static constexpr int32_t kMicGain = 32;
   int32_t dcState_ = 0;
   bool dcPrimed_ = false;
