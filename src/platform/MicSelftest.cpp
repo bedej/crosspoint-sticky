@@ -1,7 +1,5 @@
 #include "MicSelftest.h"
 
-#if defined(VOICE_MIC_SELFTEST)
-
 #include <Arduino.h>
 #include <BoardConfig.h>
 #include <Logging.h>
@@ -14,11 +12,9 @@
 
 #include <climits>
 
-namespace {
-
 // Snapshot who owns the mic pins: USB-Serial-JTAG pad/PHY enables, the IO_MUX
 // function select of each pin, and the GPIO-matrix output routing.
-void logPinOwnership(const char* when) {
+void logMicPinOwnership(const char* when) {
   const auto& mic = BoardConfig::ACTIVE.mic;
   const uint32_t conf0 = REG_READ(USB_SERIAL_JTAG_CONF0_REG);
   const uint32_t rtcUsb = REG_READ(RTC_CNTL_USB_CONF_REG);
@@ -37,7 +33,7 @@ void logPinOwnership(const char* when) {
 
 // Busy-sample GPIO_IN for the clk/data pins and count edges: a live PDM bus
 // shows both toggling; a held/unclocked line shows zero edges.
-void logPinActivity(const char* when) {
+void logMicPinActivity(const char* when) {
   uint32_t prev = REG_READ(GPIO_IN_REG);
   uint32_t edges19 = 0, edges20 = 0, high20 = 0;
   constexpr uint32_t kIters = 200000;
@@ -54,19 +50,19 @@ void logPinActivity(const char* when) {
           (unsigned long)(high20 * 100 / kIters));
 }
 
-}  // namespace
+#if defined(VOICE_MIC_SELFTEST)
 
 void runMicSelftest() {
   LOG_INF("MIC", "VOICE_MIC_SELFTEST build %s %s", __DATE__, __TIME__);
-  logPinOwnership("boot");
-  logPinActivity("boot");
+  logMicPinOwnership("boot");
+  logMicPinActivity("boot");
 
   Microphone mic;
   if (!mic.begin(16000)) {
     LOG_ERR("MIC", "mic.begin failed");
   }
-  logPinOwnership("after-begin");
-  logPinActivity("after-begin");
+  logMicPinOwnership("after-begin");
+  logMicPinActivity("after-begin");
 
   static int16_t buf[512];
   uint32_t window = 0;

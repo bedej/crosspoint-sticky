@@ -73,6 +73,13 @@ class AgentVoiceActivity : public Activity {
   static constexpr unsigned long kStallTimeoutMs = 15000;
 
   int16_t micBuf_[320];  // 20 ms @ 16 kHz mono
+  // Mic conditioning: DC blocker state (1/2^kDcShift per sample ~= 8 Hz corner
+  // at 16 kHz) and the fixed make-up gain applied before streaming.
+  static constexpr int kDcShift = 9;
+  static constexpr int32_t kMicGain = 32;
+  int32_t dcState_ = 0;
+  bool dcPrimed_ = false;
+  bool gotTranscript_ = false;
 
   // Per-listen mic level stats (logged on stop) — near-zero => mic sent silence.
   int16_t micPeak_ = 0;

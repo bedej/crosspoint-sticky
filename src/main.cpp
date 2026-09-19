@@ -18,6 +18,7 @@
 #include <WiFi.h>
 #include <XteinkDetect.h>
 #include <builtinFonts/all.h>
+#include <driver/gpio.h>
 #if FREEINK_CAP_TOUCH
 #include <esp_sntp.h>
 #endif
@@ -344,6 +345,12 @@ void setupDisplayAndFonts(bool seamless = false) {
 }
 
 void setup() {
+  // Deep sleep freezes every digital pad (gpio_deep_sleep_hold_en) and the
+  // freeze survives the wake, so peripherals whose driver just re-drives its
+  // enable pin (the sensor I2C bus, the PDM mic) come back dead. Release the
+  // global hold before anything re-inits; per-pin holds are re-armed by their
+  // owners (holdPowerRails, FrontlightManager, PowerManager).
+  gpio_deep_sleep_hold_dis();
   BoardConfig::holdPowerRails();
 
 #ifdef ENABLE_SERIAL_LOG

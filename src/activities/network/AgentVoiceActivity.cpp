@@ -1,13 +1,17 @@
 #include "AgentVoiceActivity.h"
 
 #include <ArduinoJson.h>
+#include <BoardConfig.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <WiFi.h>
+#include <driver/gpio.h>
+#include <esp_system.h>
 
 #include "WifiCredentialStore.h"
 #include "components/UITheme.h"  // VERIFY include path (drawCenteredWrappedText)
 #include "fontIds.h"             // VERIFY include path (UI_10_FONT_ID)
+#include "platform/MicSelftest.h"
 
 // ---- Endpoint config -------------------------------------------------------
 // Read at runtime from /.crosspoint/voice.json on the SD card — NO secret is baked
@@ -100,6 +104,14 @@ void AgentVoiceActivity::onEnter() {
     return;
   }
   LOG_INF("AVA", "wifi ok ip=%s rssi=%d", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+  LOG_INF("AVA", "reset reason=%d", (int)esp_reset_reason());
+  logMicPinOwnership("voice-before-begin");
+  // The sleep path (PowerManager::powerDownRailsForSleep) holds the mic enable
+  // OFF with gpio_hold_en, and the hold survives the wake; Microphone::begin()
+  // drives the pin without releasing it, so the mic would stay unpowered.
+  if (const int8_t micEn = BoardConfig::ACTIVE.mic.enable; micEn >= 0) {
+    gpio_hold_dis(static_cast<gpio_num_t>(micEn));
+  }
   if (!mic_.begin(16000)) {
     LOG_ERR("AVA", "mic begin failed");
     state_ = State::Error;
@@ -108,6 +120,8 @@ void AgentVoiceActivity::onEnter() {
     return;
   }
   LOG_INF("AVA", "mic begin ok @16k, present=%d", (int)mic_.present());
+  logMicPinOwnership("voice-after-begin");
+  logMicPinActivity("voice-after-begin");
 
   const std::string path = "/v1/stream?token=" + token_;
   LOG_INF("AVA", "ws connecting %s:%u%s", host_.c_str(), (unsigned)port_, "/v1/stream");
@@ -131,6 +145,19 @@ void AgentVoiceActivity::onExit() {
 void AgentVoiceActivity::pumpMic() {
   const int n = mic_.read(micBuf_, 320, 20);
   if (n <= 0) return;
+  // The PDM stream carries a large DC offset (~1300) and speech peaks only a
+  // few hundred LSB above it, which ASR hears as silence. One-pole DC blocker,
+  // then a fixed gain with saturation, before anything measures or sends it.
+  if (!dcPrimed_) {
+    dcState_ = micBuf_[0];
+    dcPrimed_ = true;
+  }
+  for (int i = 0; i < n; i++) {
+    const int32_t x = micBuf_[i];
+    dcState_ += (x - dcState_) >> kDcShift;
+    const int32_t ac = (x - dcState_) * kMicGain;
+    micBuf_[i] = static_cast<int16_t>(ac > 32767 ? 32767 : (ac < -32768 ? -32768 : ac));
+  }
   for (int i = 0; i < n; i++) {
     const int16_t v = micBuf_[i];
     const int32_t a = v < 0 ? -static_cast<int32_t>(v) : v;
@@ -147,6 +174,9 @@ void AgentVoiceActivity::pumpMic() {
 }
 
 void AgentVoiceActivity::startListening() {
+  dcState_ = 0;
+  dcPrimed_ = false;
+  gotTranscript_ = false;
   transcript_.clear();
   answer_.clear();
   micPeak_ = 0;
@@ -223,6 +253,12 @@ void AgentVoiceActivity::finishAnswer() {
 void AgentVoiceActivity::failTurnIfInFlight(const char* msg) {
   // The server closes right after answer.done, and the close can overtake it;
   // an answer already streamed in means the turn completed.
+  if (state_ == State::Answering && answer_.empty() && gotTranscript_ && transcript_.empty()) {
+    LOG_INF("AVA", "closed after empty transcript");
+    answer_ = "I didn't catch that - please try again.";
+    finishAnswer();
+    return;
+  }
   if (state_ == State::Answering && !answer_.empty()) {
     LOG_INF("AVA", "closed after answer (answerLen=%u), treating as done", (unsigned)answer_.length());
     finishAnswer();
@@ -270,7 +306,10 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
   lastServerMs_ = millis();  // any server frame keeps the stall watchdog alive
   if (!strcmp(t, "partial") || !strcmp(t, "transcript")) {
     transcript_ = static_cast<const char*>(doc["text"] | "");
-    if (!strcmp(t, "transcript")) LOG_INF("AVA", "final transcript: '%s'", transcript_.c_str());
+    if (!strcmp(t, "transcript")) {
+      gotTranscript_ = true;
+      LOG_INF("AVA", "final transcript: '%s'", transcript_.c_str());
+    }
     markDirty();
   } else if (!strcmp(t, "answer.delta")) {
     answer_ += static_cast<const char*>(doc["text"] | "");
