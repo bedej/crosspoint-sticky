@@ -654,6 +654,20 @@ void loop() {
         activityManager.goToVoice();
       } else if (cmd == "PTT") {
         AgentVoiceActivity::requestPushToTalk();
+      } else if (cmd.startsWith("ASK ")) {
+        // Test hooks for the conversation transcript view — see
+        // AgentVoiceActivity::injectUserTurn.
+        AgentVoiceActivity::injectUserTurn(cmd.substring(4).c_str());
+      } else if (cmd.startsWith("SAY ")) {
+        AgentVoiceActivity::injectAgentTurn(cmd.substring(4).c_str());
+      } else if (cmd == "PAGENEXT") {
+        AgentVoiceActivity::requestPageMove(1);
+      } else if (cmd == "PAGEPREV") {
+        AgentVoiceActivity::requestPageMove(-1);
+      } else if (cmd == "PAGETURNBACK") {
+        AgentVoiceActivity::requestPageMove(-2);
+      } else if (cmd == "PAGELATEST") {
+        AgentVoiceActivity::requestPageMove(2);
       }
     }
   }

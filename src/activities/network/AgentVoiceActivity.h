@@ -17,6 +17,8 @@
 #include <string>
 
 #include "activities/Activity.h"
+#include "activities/transcript/ConversationSpool.h"
+#include "activities/transcript/TranscriptView.h"
 
 class AgentVoiceActivity : public Activity {
  public:
@@ -29,6 +31,18 @@ class AgentVoiceActivity : public Activity {
 
   // Serial "CMD:PTT" (dev/test harness): toggle talk as if Up were pressed.
   static void requestPushToTalk() { pttRequested_ = true; }
+  // Serial test hooks. Touch cannot be automated and ASR needs a room with
+  // sound in it, so these are the only way to exercise the transcript view's
+  // streaming, paging and power-cycle persistence from the harness. They drive
+  // exactly the same spool + layout path a real turn does; injected agent text
+  // is dripped in chunks so the streaming cadence is the real one.
+  static void injectUserTurn(const char* text) { injectUser_ = text; }
+  static void injectAgentTurn(const char* text) {
+    injectAgent_ = text;
+    injectAgentAt_ = 0;
+  }
+  // -1 prev page, +1 next page, -2 previous turn, +2 jump to latest.
+  static void requestPageMove(int8_t move) { pageRequest_ = move; }
   void render(RenderLock&&) override;
 
   // Keep the device awake and the loop hot while a conversation is live.
@@ -40,6 +54,11 @@ class AgentVoiceActivity : public Activity {
 
  private:
   static inline volatile bool pttRequested_ = false;
+  static inline std::string injectUser_;
+  static inline std::string injectAgent_;
+  static inline size_t injectAgentAt_ = 0;
+  static inline volatile int8_t pageRequest_ = 0;
+  void pumpInjectedTurns();
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
   bool loadConfig();   // token/host/port from /.crosspoint/voice.json (SD)
@@ -48,7 +67,13 @@ class AgentVoiceActivity : public Activity {
   void stopListening();  // sends {"type":"end"}
   void pumpMic();        // read frames -> ws.sendBIN while Listening
   void handleMessage(const char* json, size_t len);
-  void markDirty();                         // throttled requestUpdate()
+  void markDirty();  // throttled requestUpdate()
+  // Paging. INHERITED from the reader rather than invented: the tap zones, the
+  // button mapping and the turn guard all come from ReaderUtils/EpubReader so a
+  // conversation feels identical to a book.
+  void handlePaging();
+  void applyPendingTurn();
+  void openSpoolTurn(ConversationSpool::Role role, const char* text);
   void appendAnswerText(const char* text);  // Markdown-stripped append
   void finishAnswer();
   void failTurnIfInFlight(const char* msg);  // Listening/Answering -> Idle + error
@@ -62,6 +87,17 @@ class AgentVoiceActivity : public Activity {
   bool wsConnected_ = false;
 
   State state_ = State::Connecting;
+  ConversationSpool spool_;
+  TranscriptView view_;
+  // Turn-safety, copied from EpubReaderActivity: a page turn that lands mid-
+  // render tears the panel. It matters more here than in a book because the
+  // reader taps while text is actively streaming in.
+  int8_t pendingManualTurn_ = 0;  // -1 prev, +1 next
+  bool pendingTurnSkip_ = false;  // long-press back: previous TURN
+  bool pendingJumpLatest_ = false;
+  unsigned long lastPageTurnMs_ = 0;
+  bool nextRefreshHalf_ = false;  // page turns get a HALF_REFRESH
+
   std::string status_;      // one-line status/header
   std::string transcript_;  // latest ASR text (partial/final)
   std::string answer_;      // accumulated answer.delta text

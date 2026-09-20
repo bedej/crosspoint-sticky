@@ -1,5 +1,8 @@
 #include "AgentVoiceActivity.h"
 
+#include "activities/RenderLock.h"
+#include "activities/reader/ReaderUtils.h"
+
 #include <ArduinoJson.h>
 #include <BoardConfig.h>
 #include <HalStorage.h>
@@ -28,7 +31,7 @@ static void wsTrampoline(WStype_t type, uint8_t* payload, size_t len) {
 }
 
 AgentVoiceActivity::AgentVoiceActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
-    : Activity("Voice", renderer, mappedInput) {}
+    : Activity("Voice", renderer, mappedInput), view_(renderer, spool_) {}
 
 AgentVoiceActivity::~AgentVoiceActivity() {
   if (g_voiceInstance == this) g_voiceInstance = nullptr;
@@ -129,12 +132,27 @@ void AgentVoiceActivity::onEnter() {
   ws_.onEvent(wsTrampoline);
   ws_.setReconnectInterval(3000);
 
+  // The spool is the conversation. Deep sleep wakes through a reset, so the
+  // page index is gone even though the text is not — rebuild it from the raw
+  // records and land on the latest page.
+  view_.begin();
+  if (spool_.begin()) {
+    view_.rebuildIndex();
+    view_.jumpToLatest();
+    LOG_INF("AVA", "session %s: %u turns, %u pages", spool_.sessionId().c_str(),
+            static_cast<unsigned>(spool_.turnCount()), static_cast<unsigned>(spool_.pageCount()));
+  } else {
+    LOG_ERR("AVA", "spool unavailable; transcript will not persist");
+  }
+
   state_ = State::Idle;
   status_ = "Press Up to talk  |  Down to exit";
   requestUpdate();
 }
 
 void AgentVoiceActivity::onExit() {
+  view_.endTurn();
+  spool_.endAgentTurn();
   mic_.end();
   ws_.disconnect();
   WiFi.disconnect(false);
@@ -204,6 +222,127 @@ void AgentVoiceActivity::stopListening() {
   markDirty();
 }
 
+// Collect a page-turn intent. Priority mirrors the reader: the menu gesture
+// (centre third) is claimed first so it can never double as a page turn, then
+// long-press variants, then a plain turn.
+void AgentVoiceActivity::handlePaging() {
+  if (ReaderUtils::isTouchMenuGesture(renderer, mappedInput)) return;
+
+  // Touch only. ReaderUtils::detectPageTurn is deliberately NOT used here:
+  // MappedInputManager maps PageBack/PageForward onto BTN_UP/BTN_DOWN, the same
+  // two side buttons voice already owns (Up talks, Down goes back), so calling
+  // it would turn a page on every push-to-talk. The reader's tap model carries
+  // over intact instead — outer horizontal thirds, centre third reserved for the
+  // menu — and the side buttons keep the voice semantics the ticket specifies.
+  const ReaderUtils::TouchPageTurn touch = ReaderUtils::detectTouchPageTurn(renderer, mappedInput);
+  bool prev = touch.prev;
+  bool next = touch.next;
+  const bool held = touch.heldMs >= ReaderUtils::SKIP_HOLD_MS;
+
+  // TURN = CHAPTER. The reader binds long-press to chapter skip, and a
+  // conversation turn is the same kind of labelled boundary.
+  if (prev && held) {
+    pendingTurnSkip_ = true;
+    prev = false;
+  }
+  // Paging back through a six-page reply and then tapping forward six times is
+  // miserable, so long-press forward returns to the live tail in one move.
+  if (next && held) {
+    pendingJumpLatest_ = true;
+    next = false;
+  }
+  if (prev) pendingManualTurn_ = -1;
+  if (next) pendingManualTurn_ = 1;
+}
+
+void AgentVoiceActivity::applyPendingTurn() {
+  if (pendingManualTurn_ == 0 && !pendingTurnSkip_ && !pendingJumpLatest_) return;
+
+  // Copied verbatim from EpubReaderActivity: never turn while the panel is
+  // mid-render, and never faster than the panel can settle.
+  constexpr unsigned long kMinManualTurnGapMs = 200;
+  if (RenderLock::peek() || (millis() - lastPageTurnMs_) < kMinManualTurnGapMs) return;
+
+  bool changed = false;
+  if (pendingJumpLatest_) {
+    changed = view_.jumpToLatest();
+    pendingJumpLatest_ = false;
+  } else if (pendingTurnSkip_) {
+    changed = view_.prevTurn();
+    pendingTurnSkip_ = false;
+  } else {
+    changed = pendingManualTurn_ > 0 ? view_.pageNext() : view_.pagePrev();
+  }
+  pendingManualTurn_ = 0;
+  if (!changed) return;
+
+  lastPageTurnMs_ = millis();
+  // Every page turn is a HALF_REFRESH, which conveniently doubles as the
+  // periodic FAST-residual cleanup: a screenful is ~14-18 FAST line appends.
+  nextRefreshHalf_ = true;
+  requestUpdate();
+}
+
+void AgentVoiceActivity::openSpoolTurn(const ConversationSpool::Role role, const char* text) {
+  // Order matters: the record has to hit the spool first so the view can record
+  // the page index against its real byte offset.
+  view_.beginTurn(role, spool_.lastTurnOffset(), spool_.lastTurnIndex());
+  view_.appendText(text);
+}
+
+// Test-harness injection, deliberately routed through the production paths:
+// the spool write, the incremental layout and the per-line refresh are all the
+// real ones, so what this verifies is what a real turn does.
+void AgentVoiceActivity::pumpInjectedTurns() {
+  if (!injectUser_.empty()) {
+    const std::string text = injectUser_;
+    injectUser_.clear();
+    if (spool_.appendUserTurn(text)) {
+      openSpoolTurn(ConversationSpool::Role::User, text.c_str());
+      view_.endTurn();
+    }
+  }
+
+  if (!injectAgent_.empty()) {
+    // One chunk per loop iteration, sized like a real answer.delta, so settled
+    // lines emerge at the same cadence and the page still fills mid-stream.
+    constexpr size_t kChunk = 48;
+    const size_t remaining = injectAgent_.size() - injectAgentAt_;
+    const size_t take = remaining < kChunk ? remaining : kChunk;
+    const std::string chunk = injectAgent_.substr(injectAgentAt_, take);
+    injectAgentAt_ += take;
+
+    const bool opensTurn = !spool_.agentTurnOpen();
+    spool_.appendAgentDelta(chunk);
+    if (opensTurn) {
+      openSpoolTurn(ConversationSpool::Role::Agent, chunk.c_str());
+    } else {
+      view_.appendText(chunk.c_str());
+    }
+
+    if (injectAgentAt_ >= injectAgent_.size()) {
+      injectAgent_.clear();
+      injectAgentAt_ = 0;
+      view_.endTurn();
+      spool_.endAgentTurn();
+      nextRefreshHalf_ = true;
+      requestUpdate();
+    }
+  }
+
+  const int8_t move = pageRequest_;
+  if (move != 0) {
+    pageRequest_ = 0;
+    if (move == 2) {
+      pendingJumpLatest_ = true;
+    } else if (move == -2) {
+      pendingTurnSkip_ = true;
+    } else {
+      pendingManualTurn_ = move;
+    }
+  }
+}
+
 void AgentVoiceActivity::loop() {
   ws_.loop();
   if (state_ == State::Listening) pumpMic();
@@ -214,6 +353,9 @@ void AgentVoiceActivity::loop() {
   const bool pttSerial = pttRequested_;
   pttRequested_ = false;
   if (pttSerial || mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+    // Talking is always about the live tail: snap forward before capturing so a
+    // reply never streams onto a page the reader has paged away from.
+    pendingJumpLatest_ = true;
     if (state_ == State::Idle || state_ == State::Answering) {
       startListening();
     } else if (state_ == State::Listening) {
@@ -221,9 +363,19 @@ void AgentVoiceActivity::loop() {
     }
   }
   if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-    finish();
-    return;
+    // Back returns to the live tail if the reader is behind it; only an
+    // already-current view exits.
+    if (!view_.atLatest()) {
+      pendingJumpLatest_ = true;
+    } else {
+      finish();
+      return;
+    }
   }
+
+  pumpInjectedTurns();
+  handlePaging();
+  applyPendingTurn();
 
   // Stall watchdog: if a turn goes quiet (WS dropped, or ASR/Hermes returned
   // nothing) surface an error instead of hanging on "Thinking...".
@@ -235,8 +387,11 @@ void AgentVoiceActivity::loop() {
     return;
   }
 
-  // E-paper is slow and ghosts — never repaint per answer.delta. Coalesce to ~400 ms.
-  if (dirty_ && millis() - lastRenderMs_ > 400) {
+  // One refresh per SETTLED LINE, never per token. A FAST refresh is 300-500 ms,
+  // so a screen fills in ~6 s while reading it takes ~55 s; the layout engine
+  // holds the ragged tail back and only completed lines reach the panel.
+  const bool linesWaiting = view_.hasPendingAppend() || view_.needsFullPaint();
+  if ((dirty_ || linesWaiting) && millis() - lastRenderMs_ > 250) {
     dirty_ = false;
     lastRenderMs_ = millis();
     requestUpdate();
@@ -262,6 +417,11 @@ void AgentVoiceActivity::appendAnswerText(const char* text) {
 }
 
 void AgentVoiceActivity::finishAnswer() {
+  // Flush the ragged tail the layout engine was holding, and close the turn so
+  // the next reply starts a fresh one in the spool.
+  view_.endTurn();
+  spool_.endAgentTurn();
+  nextRefreshHalf_ = true;
   state_ = State::Idle;
   status_ = "Press Up to talk  |  Down to exit";
   dirty_ = false;
@@ -328,10 +488,38 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     if (!strcmp(t, "transcript")) {
       gotTranscript_ = true;
       LOG_INF("AVA", "final transcript: '%s'", transcript_.c_str());
+      // The finalised ASR text is the user's turn: persist it and flow it into
+      // the document in italic, so it can be paged back to like any other turn.
+      if (!transcript_.empty() && spool_.appendUserTurn(transcript_)) {
+        openSpoolTurn(ConversationSpool::Role::User, transcript_.c_str());
+        view_.endTurn();
+      }
+    }
+    // The header is LIVE feedback only: it shows what ASR is hearing while the
+    // words have nowhere else to be. The moment the transcript is final it
+    // becomes a turn in the document below, so the header hands off rather than
+    // showing the same sentence twice.
+    if (gotTranscript_) {
+      view_.setHeader(std::string());
+    } else {
+      view_.setHeader(transcript_.empty() ? std::string() : ("You: " + transcript_));
     }
     markDirty();
   } else if (!strcmp(t, "answer.delta")) {
+    const size_t before = answer_.length();
     appendAnswerText(static_cast<const char*>(doc["text"] | ""));
+    const std::string chunk = answer_.substr(before);
+    if (!chunk.empty()) {
+      // Every delta reaches the card as it arrives, so a crash or a sleep
+      // mid-reply costs at most this chunk rather than the whole turn.
+      const bool opensTurn = !spool_.agentTurnOpen();
+      spool_.appendAgentDelta(chunk);
+      if (opensTurn) {
+        openSpoolTurn(ConversationSpool::Role::Agent, chunk.c_str());
+      } else {
+        view_.appendText(chunk.c_str());
+      }
+    }
     markDirty();
   } else if (!strcmp(t, "answer.done")) {
     LOG_INF("AVA", "answer.done answerLen=%u", (unsigned)answer_.length());
@@ -345,33 +533,26 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
 }
 
 void AgentVoiceActivity::render(RenderLock&&) {
-  renderer.clearScreen();
-  const int w = renderer.getScreenWidth();
-  const int h = renderer.getScreenHeight();
-  const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
-  constexpr int kMargin = 8;
-  const int textW = w - 2 * kMargin;
-
-  // Everything is left-aligned and laid out top-down from a fixed origin, so a
-  // streaming answer only ever appends lines — the status and the transcript
-  // above it keep their position instead of being re-flowed on every delta.
-  int y = kMargin;
-  const auto drawBlock = [&](const char* text, int maxLines) {
-    for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, text, textW, maxLines)) {
-      if (y > h - kMargin - lineH) return;
-      renderer.drawText(UI_10_FONT_ID, kMargin, y, line.c_str());
+  if (!view_.ready()) {
+    // No reader font (no SD card, or fonts missing): there is no flowed document
+    // to draw, so fall back to the plain status line rather than a blank panel.
+    renderer.clearScreen();
+    const int lineH = renderer.getLineHeight(UI_10_FONT_ID);
+    int y = 8;
+    for (const auto& line : renderer.wrappedText(UI_10_FONT_ID, status_.c_str(), renderer.getScreenWidth() - 16, 3)) {
+      renderer.drawText(UI_10_FONT_ID, 8, y, line.c_str());
       y += lineH;
     }
-  };
+    renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    return;
+  }
 
-  drawBlock(status_.c_str(), 2);
-  if (!transcript_.empty()) {
-    y += lineH;  // blank line between the status/question and what follows
-    drawBlock(("You: " + transcript_).c_str(), 4);
+  view_.setStatus(status_);
+  const auto mode = nextRefreshHalf_ ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
+  nextRefreshHalf_ = false;
+  if (view_.needsFullPaint()) {
+    view_.renderFull(mode);
+  } else {
+    view_.renderAppend();
   }
-  if (!answer_.empty()) {
-    y += lineH;  // blank line separating the question from the answer
-    drawBlock(answer_.c_str(), (h - kMargin - y) / lineH);
-  }
-  renderer.displayBuffer(HalDisplay::FAST_REFRESH);
 }
