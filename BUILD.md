@@ -164,6 +164,35 @@ Also: `NimBLEDevice::deleteAllBonds()` reaches into the NimBLE host, so calling
 it before `NimBLEDevice::init()` panics the device into a boot loop with no
 useful log line. Guard it with `isInitialized()`.
 
+### A turn that ends on the wrong transport
+
+Symptom: streaming partials look right on screen, then the moment you stop
+talking the query disappears and the answer is "I didn't catch that", while the
+phone's throughput counter clearly showed audio arriving.
+
+`stopListening()` sent `{"type":"end"}` straight down the WebSocket instead of
+calling `sendTurnEnd()`, the function that knows which transport is carrying.
+Over Bluetooth that ended two sessions wrongly at once: the device's own socket
+had received no audio, so it finalised an empty utterance and answered "I didn't
+catch that" — which then overwrote the good transcript — and the phone's session
+never finalised at all, so its recogniser kept accumulating and every later turn
+replayed the previous utterances. Two symptoms, one line.
+
+Two log labels make this hard to see, so read them carefully:
+
+- `ws=1` in `listen start` / `listen end` means a WebSocket is CONNECTED, not
+  that it is carrying the turn. The line now prints `transport=ble|wifi`.
+- `ws rx type=...` is logged for answers arriving over BLE too, because both
+  transports go through the same handler.
+
+The number that actually tells you which transport carried the audio is
+`bytesSent` against `samples`: ADPCM is 4:1 (129920 samples -> ~66 KB), raw
+PCM16 over the socket is 2 bytes per sample (~260 KB).
+
+Confirm against the backend rather than the device alone. `docker logs voice-app-1`
+prints `turn complete ... samples=N` per session; a session with `samples=0` and
+`ended_explicitly=true` is something ending a turn it never fed any audio.
+
 ## Flashing the Sticky
 
 - **`upload_speed = 460800`, not 921600.** The CH343 bridge fails to sync at
