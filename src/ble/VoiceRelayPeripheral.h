@@ -57,6 +57,14 @@ class VoiceRelayPeripheral {
   // Returns false when nothing is pending. Reassembles fragments.
   bool popAnswer(std::string& out);
 
+  // Pairing (HomeLab-tdg/jhe). Relaying requires a bonded, encrypted central;
+  // a new phone can only bond while the window is open, which the UI time-boxes.
+  void setPairingWindow(bool open);
+  bool isPairingWindowOpen() const;
+  bool isBonded() const;
+  int bondCount() const;
+  void forgetBonds();
+
   // Latest link state reported by the phone ("connecting" | "ready" | "relaying" |
   // "error"), for the device's own screen.
   std::string linkState() const;

@@ -7,6 +7,7 @@
 #include <Microphone.h>
 
 #include "audio/ImaAdpcm.h"
+#include "audio/MicConditioner.h"
 #include "ble/VoiceRelayPeripheral.h"
 
 // Headless proof of the BLE transport (HomeLab-9k7 + itn): capture from the PDM
@@ -34,10 +35,21 @@ void runBleVoiceSelftest() {
   LOG_INF("BLEST", "VOICE_BLE_SELFTEST build %s %s", __DATE__, __TIME__);
 
   auto& ble = VoiceRelayPeripheral::instance();
+  // The real UI time-boxes this (HomeLab-jhe); a self-test has no buttons, so it
+  // leaves the window open. Relaying still requires the central to bond first.
+  ble.setPairingWindow(true);
   if (!ble.begin("Sticky")) {
     LOG_ERR("BLEST", "peripheral begin failed");
     for (;;) delay(1000);
   }
+  // Bonds deliberately SURVIVE a reboot. Erasing them on every boot looks tidy
+  // and is the thing that breaks pairing: the phone keeps its half, this device
+  // throws its half away on each reflash, and every later connection fails to
+  // encrypt with no prompt and no error on either side. The peripheral now
+  // drops a bond only when pairing against it has actually failed.
+  //
+  // (forgetBonds() must be called after begin() in any case: it reaches into
+  // the NimBLE host and panics into a boot loop before init().)
 
   Microphone mic;
   if (!mic.begin(16000)) {
@@ -47,6 +59,7 @@ void runBleVoiceSelftest() {
   static int16_t pcm[kFrameSamples];
   static uint8_t coded[ImaAdpcm::encodedSize(kFrameSamples)];
   ImaAdpcm codec;
+  MicConditioner conditioner;
   std::string answer;
   uint32_t turn = 0;
 
@@ -57,7 +70,8 @@ void runBleVoiceSelftest() {
       static uint32_t lastLog = 0;
       if (millis() - lastLog > 5000) {
         lastLog = millis();
-        LOG_INF("BLEST", "waiting for a central (connected=%d)", (int)ble.isConnected());
+        LOG_INF("BLEST", "waiting for a central (connected=%d bonded=%d bonds=%d)", (int)ble.isConnected(),
+                (int)ble.isBonded(), ble.bondCount());
       }
       while (ble.popAnswer(answer)) LOG_INF("BLEST", "answer <- %s", answer.c_str());
       delay(200);
@@ -66,6 +80,7 @@ void runBleVoiceSelftest() {
 
     LOG_INF("BLEST", "turn %lu start", (unsigned long)turn++);
     codec.reset();
+    conditioner.reset();
     ble.notifyTurnStart();
 
     const uint32_t started = millis();
@@ -74,6 +89,9 @@ void runBleVoiceSelftest() {
     while (millis() - started < kTurnMs && ble.isStreaming()) {
       const int n = mic.read(pcm, kFrameSamples, 50);
       if (n <= 0) continue;
+      // Without this the stream is raw PDM: a big DC offset with speech barely
+      // above it, which ASR transcribes as nothing.
+      conditioner.process(pcm, static_cast<size_t>(n));
       for (int i = 0; i < n; i++) {
         const int32_t a = pcm[i] < 0 ? -pcm[i] : pcm[i];
         if (a > peak) peak = a;
