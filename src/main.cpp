@@ -37,6 +37,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/network/AgentVoiceActivity.h"
 #include "activities/settings/SdFirmwareUpdateActivity.h"
+#include "ble/VoiceRelayPeripheral.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
@@ -685,6 +686,17 @@ void loop() {
         AgentVoiceActivity::requestSessionList();
       } else if (cmd == "PAGELATEST") {
         AgentVoiceActivity::requestPageMove(2);
+      } else if (cmd == "BLEFORGET") {
+        // Until the phone-link UI exists (HomeLab-jhe), this is the only way to
+        // clear a bond the phone no longer has. A device holding one is worse
+        // than a device holding none: it rejects every phone that is not the
+        // one it remembers, and neither end reports why.
+        VoiceRelayPeripheral::instance().forgetBonds();
+      } else if (cmd == "BLESTATE") {
+        auto& ble = VoiceRelayPeripheral::instance();
+        LOG_INF("BLE", "state: supported=%d connected=%d streaming=%d bonded=%d bonds=%d window=%d phone='%s'",
+                (int)VoiceRelayPeripheral::supported(), (int)ble.isConnected(), (int)ble.isStreaming(),
+                (int)ble.isBonded(), ble.bondCount(), (int)ble.isPairingWindowOpen(), ble.linkState().c_str());
       }
     }
   }

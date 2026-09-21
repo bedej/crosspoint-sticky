@@ -10,6 +10,7 @@ VoiceRelayPeripheral& VoiceRelayPeripheral::instance() {
 #include <Arduino.h>
 #include <Logging.h>
 #include <NimBLEDevice.h>
+#include <Preferences.h>
 
 #include <cstring>
 #include <mutex>
@@ -52,6 +53,31 @@ State& st() {
   return s;
 }
 
+// Whether a phone has ever completed voice pairing, kept in NVS.
+//
+// NimBLE's bond count cannot answer this. It counts every peer record in the
+// store, including the SDK's BLE keyboard, and this device holds one that
+// neither deleteAllBonds() nor deleteBond(address) will remove — verified on
+// hardware: "bonds NOT erased: 1 remain (was 1)". Gating first-pairing on that
+// count therefore locks out every phone forever.
+constexpr const char* kPrefNamespace = "vrelay";
+constexpr const char* kPrefPaired = "paired";
+
+bool voicePhonePaired() {
+  Preferences prefs;
+  if (!prefs.begin(kPrefNamespace, /*readOnly=*/true)) return false;
+  const bool paired = prefs.getBool(kPrefPaired, false);
+  prefs.end();
+  return paired;
+}
+
+void setVoicePhonePaired(bool paired) {
+  Preferences prefs;
+  if (!prefs.begin(kPrefNamespace, /*readOnly=*/false)) return;
+  prefs.putBool(kPrefPaired, paired);
+  prefs.end();
+}
+
 void notifyControlJson(const std::string& json) {
   auto& s = st();
   if (!s.control) return;
@@ -72,7 +98,12 @@ class ServerCallbacks : public NimBLEServerCallbacks {
             (int)info.isBonded(), (int)info.isEncrypted(), NimBLEDevice::getNumBonds());
     // Outside a pairing window only an already-bonded phone may stay. A stranger
     // is disconnected rather than left to attempt pairing.
-    if (!info.isBonded() && !st().pairingOpen) {
+    //
+    // A device holding no bonds at all is the exception: first pairing wins.
+    // Requiring a deliberately-opened window even for the first phone is a
+    // bootstrap deadlock, because the only UI that can open one is on the device
+    // the phone has not paired with yet.
+    if (!info.isBonded() && !st().pairingOpen && voicePhonePaired()) {
       LOG_INF("BLE", "unbonded central and no pairing window; disconnecting");
       server->disconnect(info.getConnHandle());
       return;
@@ -121,6 +152,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
         st().seq = 0;
       }
     }
+    if (info.isEncrypted() && info.isBonded()) setVoicePhonePaired(true);
     LOG_INF("BLE", "pairing complete (bonded=%d encrypted=%d auth=%d) bonds=%d", (int)info.isBonded(),
             (int)info.isEncrypted(), (int)info.isAuthenticated(), NimBLEDevice::getNumBonds());
     if (!info.isEncrypted()) {
@@ -131,6 +163,9 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       // starts clean, rather than sitting here unencrypted forever.
       LOG_ERR("BLE", "link did not encrypt; dropping our bond for %s and disconnecting",
               info.getAddress().toString().c_str());
+      // Clear our own marker first: it is what gates pairing, and it must come off
+      // even when the NimBLE store refuses to give up its record.
+      setVoicePhonePaired(false);
       const int before = NimBLEDevice::getNumBonds();
       NimBLEDevice::deleteBond(info.getAddress());
       if (NimBLEDevice::getNumBonds() >= before && before > 0) {
@@ -238,11 +273,11 @@ bool VoiceRelayPeripheral::begin(const char* deviceName) {
   // pairing — the phone has no other way to be told this link must be
   // encrypted, because subscribing to a notify characteristic is NOT gated by
   // the stack (verified: an unencrypted central subscribed successfully).
-  s.audioUp = svc->createCharacteristic(
-      kAudioUpUuid, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC);
+  s.audioUp = svc->createCharacteristic(kAudioUpUuid,
+                                        NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC);
   s.audioUp->setCallbacks(new AudioUpCallbacks());
   s.control = svc->createCharacteristic(kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
-                                                           NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::NOTIFY);
+                                                          NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::NOTIFY);
   s.control->setCallbacks(new InboundCallbacks());
   // The phone is the central, so device-bound messages are WRITES, not notifies.
   s.answerDown = svc->createCharacteristic(
@@ -331,6 +366,10 @@ void VoiceRelayPeripheral::setPairingWindow(bool open) {
 }
 
 bool VoiceRelayPeripheral::isPairingWindowOpen() const {
+  // A device with no bonds is implicitly open to its first phone, and the UI
+  // should say so rather than inviting the user to open a window that is
+  // already effectively open.
+  if (!voicePhonePaired()) return true;
   std::lock_guard<std::mutex> lk(st().mtx);
   return st().pairingOpen;
 }
@@ -363,7 +402,10 @@ void VoiceRelayPeripheral::forgetBonds() {
     left = now;
   }
   if (left > 0) {
-    LOG_ERR("BLE", "bonds NOT erased: %d remain (was %d)", left, before);
+    // Not fatal: the marker is cleared, so the next phone may pair regardless.
+    // The stragglers belong to other features (the BLE keyboard) or are records
+    // the store will not release.
+    LOG_ERR("BLE", "bonds NOT erased: %d remain (was %d); pairing reopened anyway", left, before);
   } else {
     LOG_INF("BLE", "bonds erased (%d)", before);
   }

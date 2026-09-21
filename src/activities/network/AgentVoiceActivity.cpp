@@ -1,22 +1,21 @@
 #include "AgentVoiceActivity.h"
 
-#include "activities/RenderLock.h"
-#include "CrossPointSettings.h"
-#include "activities/reader/ReaderUtils.h"
-#include "activities/settings/TextSettingsActivity.h"
-#include "activities/transcript/ConversationPickerActivity.h"
-#include <HalClock.h>
-#include "SdCardFontSystem.h"
-
 #include <ArduinoJson.h>
 #include <BoardConfig.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <WiFi.h>
 #include <driver/gpio.h>
 #include <esp_system.h>
 
+#include "CrossPointSettings.h"
+#include "SdCardFontSystem.h"
 #include "WifiCredentialStore.h"
+#include "activities/RenderLock.h"
+#include "activities/reader/ReaderUtils.h"
+#include "activities/settings/TextSettingsActivity.h"
+#include "activities/transcript/ConversationPickerActivity.h"
 #include "components/UITheme.h"  // VERIFY include path (drawCenteredWrappedText)
 #include "fontIds.h"             // VERIFY include path (UI_10_FONT_ID)
 #include "platform/MicSelftest.h"
@@ -231,7 +230,6 @@ void AgentVoiceActivity::releasePcmBuffer() {
   pcmOverflowed_ = false;
 }
 
-
 bool AgentVoiceActivity::loadConfig() {
   host_ = VOICE_HOST_DEFAULT;
   port_ = VOICE_PORT_DEFAULT;
@@ -397,9 +395,15 @@ void AgentVoiceActivity::sendTurnEnd() {
 
 void AgentVoiceActivity::stopListening() {
   const uint32_t avgAbs = micCount_ ? static_cast<uint32_t>(micAbsSum_ / micCount_) : 0;
-  LOG_INF("AVA", "listen end: samples=%u avgAbs=%u peak=%d bytesSent=%u dropped=%u ws=%d", micCount_, avgAbs,
-          (int)micPeak_, bytesSent_, framesDropped_, (int)wsConnected_);
-  ws_.sendTXT("{\"type\":\"end\"}");
+  LOG_INF("AVA", "listen end: transport=%s samples=%u avgAbs=%u peak=%d bytesSent=%u dropped=%u ws=%d",
+          turnTransport_ == Transport::Ble ? "ble" : "wifi", micCount_, avgAbs, (int)micPeak_, bytesSent_,
+          framesDropped_, (int)wsConnected_);
+  // Down the transport that carried the audio. Ending the turn on the socket
+  // while BLE carried it ends the WRONG session: the phone's turn never
+  // finalises (its recogniser keeps accumulating into the next utterance) and
+  // the device's own empty socket session answers "I didn't catch that", which
+  // then overwrites the real transcript on screen.
+  sendTurnEnd();
   state_ = State::Answering;
   status_ = "Thinking...";
   lastServerMs_ = millis();  // arm the stall watchdog
@@ -419,7 +423,7 @@ void AgentVoiceActivity::openTextSettings() {
   view_.clearDraft();
 
   startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
-                                                               TextSettingsActivity::Tab::Size),
+                                                                TextSettingsActivity::Tab::Size),
                          [this](const ActivityResult&) {
                            // A font, size or margin change is a new RenderSpec, which drops the
                            // page index and rejects the persisted one; the spool is raw text and
@@ -513,26 +517,25 @@ void AgentVoiceActivity::openConversations() {
   spool_.endAgentTurn();
   view_.clearDraft();
 
-  startActivityForResult(
-      std::make_unique<ConversationPickerActivity>(renderer, mappedInput, spool_.sessionId()),
-      [this](const ActivityResult& result) {
-        if (result.isCancelled) {
-          view_.markFullPaint();
-          requestUpdate();
-          return;
-        }
-        // No FilePathResult means the picker was dismissed rather than chosen
-        // from — a gesture back, say. Treating that as an empty path would have
-        // read as "start a new conversation", so backing out would have created
-        // one every time.
-        const auto* choice = std::get_if<FilePathResult>(&result.data);
-        if (choice == nullptr) {
-          view_.markFullPaint();
-          requestUpdate();
-          return;
-        }
-        applyConversationChoice(choice->path);
-      });
+  startActivityForResult(std::make_unique<ConversationPickerActivity>(renderer, mappedInput, spool_.sessionId()),
+                         [this](const ActivityResult& result) {
+                           if (result.isCancelled) {
+                             view_.markFullPaint();
+                             requestUpdate();
+                             return;
+                           }
+                           // No FilePathResult means the picker was dismissed rather than chosen
+                           // from — a gesture back, say. Treating that as an empty path would have
+                           // read as "start a new conversation", so backing out would have created
+                           // one every time.
+                           const auto* choice = std::get_if<FilePathResult>(&result.data);
+                           if (choice == nullptr) {
+                             view_.markFullPaint();
+                             requestUpdate();
+                             return;
+                           }
+                           applyConversationChoice(choice->path);
+                         });
 }
 
 void AgentVoiceActivity::applyConversationChoice(const std::string& sessionId) {
@@ -793,9 +796,9 @@ bool AgentVoiceActivity::handleVoiceButtons() {
   // which is why the button appeared dead. A press emits exactly one of the
   // two, so accepting both cannot double-toggle: tap -> Confirm, medium hold ->
   // Power, and a hold long enough to mean sleep never reaches a release at all.
-  const bool talkTap = mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
-                       (mappedInput.wasReleased(MappedInputManager::Button::Power) &&
-                        mappedInput.getHeldTime() < kPowerSleepHoldMs);
+  const bool talkTap =
+      mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+      (mappedInput.wasReleased(MappedInputManager::Button::Power) && mappedInput.getHeldTime() < kPowerSleepHoldMs);
   if (pttSerial || talkTap) {
     // Talking is always about the live tail: snap forward before capturing so a
     // reply never streams onto a page the reader has paged away from.
@@ -832,9 +835,9 @@ void AgentVoiceActivity::loop() {
   pumpBleAnswers();
   pumpLink();
   drainPcmBuffer();
-  if (pendingEnd_ && wsConnected_ && pcmBufferEmpty()) {
+  if (pendingEnd_ && pcmBufferEmpty() && (turnTransport_ == Transport::Ble || wsConnected_)) {
     pendingEnd_ = false;
-    ws_.sendTXT("{\"type\":\"end\"}");
+    sendTurnEnd();
   }
   if (state_ == State::Listening) pumpMic();
 
@@ -936,6 +939,14 @@ void AgentVoiceActivity::finishAnswer() {
 }
 
 void AgentVoiceActivity::failTurnIfInFlight(const char* msg) {
+  // A socket that closes while BLE is carrying the turn says nothing about the
+  // turn: the backend closes the device's idle session on its own schedule, and
+  // treating that as a failure would abandon an utterance that is still in
+  // flight over Bluetooth.
+  if (turnTransport_ == Transport::Ble) {
+    LOG_INF("AVA", "ignoring socket close: this turn is on BLE");
+    return;
+  }
   // The server closes right after answer.done, and the close can overtake it;
   // an answer already streamed in means the turn completed.
   if (state_ == State::Answering && answer_.empty() && gotTranscript_ && transcript_.empty()) {
