@@ -8,6 +8,8 @@
 #include <cstring>
 
 #include "CrossPointSettings.h"
+#include "components/UITheme.h"
+#include "components/themes/BaseTheme.h"
 #include "fontIds.h"
 
 namespace {
@@ -48,7 +50,9 @@ void TranscriptView::begin() {
   // One reserved line at the top (live ASR) and one at the bottom (page n/N and
   // the unread-tail indicator). Neither may be eaten by the flowed body.
   bodyTop_ = kEdge + uiLineH_ + kChromeGap + 1 /* rule */ + kChromeGap;
-  footerTop_ = screenH - kEdge - uiLineH_;
+  // The bottom bar is the reader's, so reserve exactly what it occupies rather
+  // than a guess at one text line.
+  footerTop_ = screenH - UITheme::getStatusBarHeight();
   const int bodyHeight = (footerTop_ - kChromeGap) - bodyTop_;
   linesPerPage_ = static_cast<uint16_t>(std::max(0, bodyHeight / lineAdvance_));
 
@@ -512,36 +516,42 @@ bool TranscriptView::jumpToLatest() {
 // ---------------------------------------------------------------------------
 // drawing
 
-// Three ascending bars: filled ones count up as the link comes up, so the state
-// reads at a glance without a legend. Drawn from rectangles rather than the
-// 32x32 WifiIcon asset, which does not fit a single UI line.
+// Bars only mean signal once there IS a link. While the radio is still coming
+// up, filled-in bars read as "connected, weak" — which is the opposite of the
+// truth — so those states say so in words instead.
 int TranscriptView::drawLinkIndicator(const int right, const int top) const {
+  const char* label = nullptr;
+  int filled = 0;
+  switch (link_) {
+    case Link::Connecting:
+      label = "connecting";
+      break;
+    case Link::Failed:
+      label = "no wi-fi";
+      break;
+    case Link::Offline:
+      label = "offline";
+      break;
+    case Link::WifiUp:
+      filled = 2;  // associated, socket not up yet
+      break;
+    case Link::Online:
+      filled = 3;
+      break;
+  }
+
+  if (label != nullptr) {
+    const int w = renderer_.getTextAdvanceX(UI_10_FONT_ID, label, EpdFontFamily::REGULAR);
+    renderer_.drawText(UI_10_FONT_ID, right - w, top, label);
+    return w;
+  }
+
   constexpr int kBars = 3;
   constexpr int kBarW = 4;
   constexpr int kGap = 2;
   const int height = std::max(6, uiLineH_ - 4);
   const int width = kBars * kBarW + (kBars - 1) * kGap;
   const int x0 = right - width;
-
-  int filled = 0;
-  switch (link_) {
-    case Link::Offline:
-      filled = 0;
-      break;
-    case Link::Connecting:
-      filled = 1;
-      break;
-    case Link::WifiUp:
-      filled = 2;
-      break;
-    case Link::Online:
-      filled = 3;
-      break;
-    case Link::Failed:
-      filled = 0;
-      break;
-  }
-
   for (int i = 0; i < kBars; ++i) {
     const int barH = (height * (i + 1)) / kBars;
     const int x = x0 + i * (kBarW + kGap);
@@ -549,15 +559,7 @@ int TranscriptView::drawLinkIndicator(const int right, const int top) const {
     if (i < filled) {
       renderer_.fillRect(x, y, kBarW, barH, true);
     } else {
-      renderer_.drawRect(x, y, kBarW, barH, true);  // hollow: not up yet
-    }
-  }
-  // Failed is not "zero bars" — that is indistinguishable from starting up — so
-  // it gets a slash through the whole indicator.
-  if (link_ == Link::Failed) {
-    for (int i = 0; i < width; ++i) {
-      const int y = top + height - 1 - (i * (height - 1)) / (width > 1 ? width - 1 : 1);
-      renderer_.fillRect(x0 + i, y, 1, 1, true);
+      renderer_.drawRect(x, y, kBarW, barH, true);
     }
   }
   return width;
@@ -608,21 +610,24 @@ void TranscriptView::drawLine(const size_t index) const {
 void TranscriptView::drawFooter() const {
   const int w = renderer_.getScreenWidth();
   // Erase first: the footer is redrawn inside somebody else's refresh.
-  renderer_.fillRect(0, footerTop_ - kChromeGap, w, uiLineH_ + kChromeGap + kEdge, false);
+  renderer_.fillRect(0, footerTop_ - kChromeGap, w, renderer_.getScreenHeight() - footerTop_ + kChromeGap, false);
 
-  char buf[64];
   const size_t total = pageCountOrOne();
-  snprintf(buf, sizeof(buf), "%u/%u", static_cast<unsigned>(curPage_ + 1), static_cast<unsigned>(total));
-  renderer_.drawText(UI_10_FONT_ID, kEdge, footerTop_, buf);
+  const int current = static_cast<int>(curPage_ + 1);
+  const float progress = total > 0 ? (static_cast<float>(current) * 100.0f / static_cast<float>(total)) : 0.0f;
 
   // The single most confusing state in a streaming transcript on a device with
-  // no scrollbar is "has it finished, or is more coming?". Say so explicitly.
+  // no scrollbar is "has it finished, or is more coming?", so the centre slot —
+  // the reader's book title — carries the unread tail instead.
+  char more[32] = {0};
   if (hasMore()) {
-    const size_t behind = livePage_ - curPage_;
-    snprintf(buf, sizeof(buf), "v %u more", static_cast<unsigned>(behind));
-    const int tw = renderer_.getTextAdvanceX(UI_10_FONT_ID, buf, EpdFontFamily::REGULAR);
-    renderer_.drawText(UI_10_FONT_ID, w - kEdge - tw, footerTop_, buf);
+    snprintf(more, sizeof(more), "%u more", static_cast<unsigned>(livePage_ - curPage_));
   }
+
+  // The reader's own status bar: battery on the left, page index on the right,
+  // its fonts and its margins, and it honours the user's status-bar settings
+  // (percentage, progress bar, clock) for free.
+  BaseTheme::drawStatusBar(renderer_, progress, current, static_cast<int>(total), more);
 }
 
 void TranscriptView::paintFull() {

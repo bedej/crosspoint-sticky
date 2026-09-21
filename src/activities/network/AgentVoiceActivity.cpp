@@ -241,7 +241,7 @@ void AgentVoiceActivity::onEnter() {
 
   // Paint the restored conversation NOW, then bring the link up behind it.
   state_ = State::Idle;
-  status_ = "Power to talk  |  Up/Down pages  |  hold Down exits";
+  status_ = "Power to talk";
   requestUpdateAndWait();
 
   startWifi();
@@ -354,7 +354,7 @@ void AgentVoiceActivity::openTextSettings() {
 
                            view_.restoreIndex();
                            view_.jumpToLatest();
-                           status_ = "Power to talk  |  Up/Down pages  |  hold Down exits";
+                           status_ = "Power to talk";
                            nextIsPageTurn_ = true;
                            requestUpdate();
                          });
@@ -636,7 +636,7 @@ void AgentVoiceActivity::finishAnswer() {
   spool_.endAgentTurn();
   nextIsPageTurn_ = true;
   state_ = State::Idle;
-  status_ = "Power to talk  |  Up/Down pages  |  hold Down exits";
+  status_ = "Power to talk";
   dirty_ = false;
   lastRenderMs_ = 0;
   requestUpdate(true);  // one clean full-ish refresh at the end
