@@ -146,6 +146,11 @@ void ConversationPickerActivity::activateIndex(const int index) {
   finish();
 }
 
+bool ConversationPickerActivity::handleHomeGesture() {
+  onBackButton();  // finish() with no result — the caller reads that as dismissed
+  return true;
+}
+
 void ConversationPickerActivity::onRowLongPress(const int index) { showDeleteConfirmation(index); }
 
 void ConversationPickerActivity::showDeleteConfirmation(const int index) {

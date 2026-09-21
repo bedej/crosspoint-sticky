@@ -19,6 +19,10 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "audio/ImaAdpcm.h"
+#include "audio/MicConditioner.h"
+#include "ble/VoiceRelayPeripheral.h"
+
 #include "activities/transcript/ConversationSpool.h"
 #include "activities/transcript/TranscriptView.h"
 
@@ -90,6 +94,13 @@ class AgentVoiceActivity : public Activity {
   bool loadConfig();  // token/host/port from /.crosspoint/voice.json (SD)
   void startWifi();   // STA from saved creds — begins, never waits
   void pumpLink();    // watch the association, open the socket when it is up
+  void pumpBleAnswers();  // drain answer-down JSON the phone wrote
+  // Which way this turn travels. Latched when capture starts, because audio
+  // buffered for one transport must not be drained down another.
+  enum class Transport : uint8_t { None, Ble, Wifi };
+  Transport chooseTransport() const;
+  void updateTransportIndicator();
+  bool sendAudio(const int16_t* pcm, size_t count);
   // Pre-connect capture. Audio is buffered while the socket is down and drained
   // in order once it is up, so the user can start talking immediately.
   void bufferPcm(const uint8_t* data, size_t len);
@@ -97,7 +108,8 @@ class AgentVoiceActivity : public Activity {
   void releasePcmBuffer();
   bool pcmBufferEmpty() const { return segments_.empty(); }
   void startListening();
-  void stopListening();  // sends {"type":"end"}
+  void stopListening();
+  void sendTurnEnd();  // however the active transport says "utterance over"
   void pumpMic();        // read frames -> ws.sendBIN while Listening
   void handleMessage(const char* json, size_t len);
   void markDirty();  // throttled requestUpdate()
@@ -148,6 +160,13 @@ class AgentVoiceActivity : public Activity {
   bool pcmOverflowed_ = false;
   bool pendingEnd_ = false;  // end-of-utterance held back until the audio is sent
 
+  // Bluetooth first, Wi-Fi fallback. A phone in a pocket can carry a turn where
+  // the house network cannot reach, so it wins when one is linked.
+  Transport turnTransport_ = Transport::None;
+  bool bleStarted_ = false;
+  ImaAdpcm encoder_;
+  uint8_t coded_[ImaAdpcm::encodedSize(320)];
+
   State state_ = State::Connecting;
   ConversationSpool spool_;
   TranscriptView view_;
@@ -176,13 +195,10 @@ class AgentVoiceActivity : public Activity {
   static constexpr uint32_t kIdleNewSessionSecs = 4 * 60 * 60;
 
   int16_t micBuf_[320];  // 20 ms @ 16 kHz mono
-  // Mic conditioning: DC blocker state (1/2^kDcShift per sample ~= 8 Hz corner
-  // at 16 kHz) and the fixed make-up gain applied before streaming.
-  static constexpr int kDcShift = 9;
-  static constexpr int kDcFrac = 8;  // fixed-point bits below the LSB in dcState_
-  static constexpr int32_t kMicGain = 32;
-  int32_t dcState_ = 0;
-  bool dcPrimed_ = false;
+  // DC block + make-up gain. Shared with the BLE path rather than duplicated:
+  // two copies would drift, and the failure mode — quiet audio, empty
+  // transcripts — is invisible from the device.
+  MicConditioner conditioner_;
   bool gotTranscript_ = false;
   // An emphasis run that a delta ended part way through: deltas split anywhere,
   // including between the two chars of a '**'.

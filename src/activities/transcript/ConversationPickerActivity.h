@@ -23,6 +23,10 @@ class ConversationPickerActivity final : public UiListActivity {
 
   void onEnter() override;
   void render(RenderLock&&) override;
+  // Bottom-edge up means "back" throughout the voice assistant, so it returns to
+  // the conversation rather than leaving the app. ActivityManager consumes that
+  // gesture globally as Home unless an activity claims it here.
+  bool handleHomeGesture() override;
 
  private:
   // Row 0 is always "New conversation"; sessions follow, newest first.

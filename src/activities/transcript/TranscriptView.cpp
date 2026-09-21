@@ -99,6 +99,12 @@ void TranscriptView::setListening(const bool listening) {
   fullPaint_ = true;
 }
 
+void TranscriptView::setTransport(const Transport transport) {
+  if (transport_ == transport) return;
+  transport_ = transport;
+  fullPaint_ = true;
+}
+
 void TranscriptView::setStatus(const std::string& text) {
   if (status_ == text) return;
   status_ = text;
@@ -570,6 +576,11 @@ void TranscriptView::closeRail() {
   fullPaint_ = true;
 }
 
+int TranscriptView::railPageRows() const {
+  const size_t visible = railVisibleRows();
+  return visible > 1 ? static_cast<int>(visible - 1) : 1;
+}
+
 bool TranscriptView::railScroll(const int rows) {
   if (!railOpen_ || rows == 0) return false;
   const size_t visible = railVisibleRows();
@@ -643,11 +654,12 @@ void TranscriptView::drawRail() {
     if (active) renderer_.fillRect(left + 1, y, kRailWidth - 1, rowH, true);
     const bool ink = !active;  // invert the text on the filled row
 
+    // The number alone. A box around it never lined up with the text baseline
+    // and cost width the question needed more.
     char ordinal[8];
     snprintf(ordinal, sizeof(ordinal), "%u", static_cast<unsigned>(index + 1));
     const int ordW = renderer_.getTextAdvanceX(UI_10_FONT_ID, ordinal, EpdFontFamily::REGULAR);
-    renderer_.drawRect(left + kRailPad, y + kRailPad, kRailOrdinal, kRailOrdinal, ink);
-    renderer_.drawText(UI_10_FONT_ID, left + kRailPad + (kRailOrdinal - ordW) / 2, y + kRailPad + 1, ordinal, ink);
+    renderer_.drawText(UI_10_FONT_ID, left + kRailPad + (kRailOrdinal - ordW), y + kRailPad, ordinal, ink);
 
     const int textLeft = left + kRailPad + kRailOrdinal + 4;
     const int textW = screenW - kEdge - textLeft;
@@ -762,7 +774,29 @@ bool TranscriptView::jumpToLatest() {
 //   no link     hollow bars struck through
 //   associated  two filled bars (socket still opening)
 //   online      three filled bars
+// The Bluetooth rune: a stem with two crossing strokes. Drawn from lines for the
+// same reason the signal bars are — the icon assets are 32x32 and do not scale.
+int TranscriptView::drawBluetoothGlyph(const int right, const int top) const {
+  const int h = std::max(8, uiLineH_ - 2);
+  const int w = h / 2;
+  const int x0 = right - w;
+  const int cx = x0 + w / 2;
+  const int q = h / 4;
+
+  renderer_.drawLine(cx, top, cx, top + h, 2, true);
+  renderer_.drawLine(cx, top, right, top + q, 2, true);
+  renderer_.drawLine(right, top + q, x0, top + h - q, 2, true);
+  renderer_.drawLine(cx, top + h, right, top + h - q, 2, true);
+  renderer_.drawLine(right, top + h - q, x0, top + q, 2, true);
+  return w;
+}
+
 int TranscriptView::drawLinkIndicator(const int right, const int top) const {
+  if (transport_ == Transport::Ble) {
+    // A linked phone is carrying the turn, so the Wi-Fi state is irrelevant —
+    // showing bars here would describe a path nothing is using.
+    return drawBluetoothGlyph(right, top);
+  }
   constexpr int kBars = 3;
   constexpr int kBarW = 4;
   constexpr int kGap = 2;

@@ -68,6 +68,50 @@ void AgentVoiceActivity::startWifi() {
   view_.setLink(TranscriptView::Link::Connecting);
 }
 
+// Bluetooth first, Wi-Fi fallback — Bede's choice, and the right one: a phone
+// in a pocket reaches the backend from places the house network does not.
+// "Ready" for BLE means a central has actually SUBSCRIBED, not merely connected;
+// frames sent before that are dropped by the stack.
+AgentVoiceActivity::Transport AgentVoiceActivity::chooseTransport() const {
+  if (VoiceRelayPeripheral::supported() && VoiceRelayPeripheral::instance().isStreaming()) return Transport::Ble;
+  if (wsConnected_) return Transport::Wifi;
+  return Transport::None;
+}
+
+void AgentVoiceActivity::updateTransportIndicator() {
+  const bool ble = VoiceRelayPeripheral::supported() && VoiceRelayPeripheral::instance().isStreaming();
+  view_.setTransport(ble ? TranscriptView::Transport::Ble : TranscriptView::Transport::Wifi);
+}
+
+bool AgentVoiceActivity::sendAudio(const int16_t* pcm, const size_t count) {
+  if (turnTransport_ == Transport::Ble) {
+    // Compressed 4:1 before it goes out: the link has far less headroom than
+    // the socket, and dropping frames is worse for ASR than compressing them.
+    const size_t coded = encoder_.encode(pcm, count, coded_);
+    if (coded == 0) return false;
+    if (!VoiceRelayPeripheral::instance().sendAudioFrame(coded_, coded)) return false;
+    bytesSent_ += static_cast<uint32_t>(coded);
+    return true;
+  }
+  if (turnTransport_ == Transport::Wifi && wsConnected_) {
+    ws_.sendBIN(reinterpret_cast<const uint8_t*>(pcm), count * sizeof(int16_t));
+    bytesSent_ += static_cast<uint32_t>(count) * sizeof(int16_t);
+    return true;
+  }
+  return false;
+}
+
+// The phone forwards the backend's own JSON verbatim, so this goes through the
+// same handler the WebSocket path uses — one parser, one set of semantics.
+void AgentVoiceActivity::pumpBleAnswers() {
+  if (!VoiceRelayPeripheral::supported()) return;
+  std::string json;
+  while (VoiceRelayPeripheral::instance().popAnswer(json)) {
+    lastServerMs_ = millis();
+    handleMessage(json.c_str(), json.size());
+  }
+}
+
 // Association progress, watched from the loop instead of waited on.
 void AgentVoiceActivity::pumpLink() {
   if (state_ == State::Error) return;
@@ -134,7 +178,14 @@ void AgentVoiceActivity::bufferPcm(const uint8_t* data, const size_t len) {
 }
 
 void AgentVoiceActivity::drainPcmBuffer() {
-  if (!wsConnected_ || segments_.empty()) return;
+  if (segments_.empty()) return;
+  if (turnTransport_ == Transport::None) {
+    // Nothing to drain TO yet. Claim a transport the moment one is ready — the
+    // audio was captured before either existed, so either may carry it.
+    turnTransport_ = chooseTransport();
+    if (turnTransport_ == Transport::None) return;
+    updateTransportIndicator();
+  }
   // Sent in the same 20 ms frames the live path uses — the service reads a
   // frame stream, not a blob — and rate-limited so a drain cannot monopolise
   // the loop while the panel still has to render.
@@ -149,8 +200,9 @@ void AgentVoiceActivity::drainPcmBuffer() {
       continue;
     }
     const size_t take = available < kFrameBytes ? available : kFrameBytes;
-    ws_.sendBIN(segments_[drainSegment_].get() + drainOffset_, take);
-    bytesSent_ += static_cast<uint32_t>(take);
+    // Offsets advance in whole frames, so this stays 2-byte aligned.
+    const int16_t* pcm = reinterpret_cast<const int16_t*>(segments_[drainSegment_].get() + drainOffset_);
+    if (!sendAudio(pcm, take / sizeof(int16_t))) break;  // retry on the next pass
     drainOffset_ += take;
   }
   if (drainSegment_ >= segments_.size()) {
@@ -158,7 +210,7 @@ void AgentVoiceActivity::drainPcmBuffer() {
     releasePcmBuffer();
     if (pendingEnd_) {
       pendingEnd_ = false;
-      ws_.sendTXT("{\"type\":\"end\"}");
+      sendTurnEnd();
     }
   }
 }
@@ -242,6 +294,13 @@ void AgentVoiceActivity::onEnter() {
     LOG_ERR("AVA", "spool unavailable; transcript will not persist");
   }
 
+  // Advertise before Wi-Fi: a phone that is already paired can pick the link up
+  // while the radio is still associating, and then carries the turn instead.
+  if (VoiceRelayPeripheral::supported()) {
+    bleStarted_ = VoiceRelayPeripheral::instance().begin("Sticky");
+    LOG_INF("AVA", "ble peripheral %s", bleStarted_ ? "advertising" : "failed to start");
+  }
+
   // Paint the restored conversation NOW, then bring the link up behind it.
   state_ = State::Idle;
   status_ = "Power to talk";
@@ -251,6 +310,10 @@ void AgentVoiceActivity::onEnter() {
 }
 
 void AgentVoiceActivity::onExit() {
+  if (bleStarted_) {
+    VoiceRelayPeripheral::instance().end();
+    bleStarted_ = false;
+  }
   view_.endTurn();
   spool_.endAgentTurn();
   mic_.end();
@@ -264,22 +327,10 @@ void AgentVoiceActivity::onExit() {
 void AgentVoiceActivity::pumpMic() {
   const int n = mic_.read(micBuf_, 320, 20);
   if (n <= 0) return;
-  // The PDM stream carries a large DC offset (~1300) and speech peaks only a
-  // few hundred LSB above it, which ASR hears as silence. One-pole DC blocker,
-  // then a fixed gain with saturation, before anything measures or sends it.
-  if (!dcPrimed_) {
-    dcState_ = static_cast<int32_t>(micBuf_[0]) << kDcFrac;
-    dcPrimed_ = true;
-  }
-  for (int i = 0; i < n; i++) {
-    const int32_t x = micBuf_[i];
-    // dcState_ is Q<kDcFrac>: tracking the offset at sub-LSB resolution keeps the
-    // integer shift from stalling while still short of it — a leftover offset
-    // would be amplified with the signal and eat the headroom.
-    dcState_ += ((x << kDcFrac) - dcState_) >> kDcShift;
-    const int32_t ac = (x - (dcState_ >> kDcFrac)) * kMicGain;
-    micBuf_[i] = static_cast<int16_t>(ac > 32767 ? 32767 : (ac < -32768 ? -32768 : ac));
-  }
+  // DC block + make-up gain, from the shared implementation so the BLE path
+  // cannot silently ship raw PDM the backend hears as noise.
+  conditioner_.process(micBuf_, static_cast<size_t>(n));
+
   for (int i = 0; i < n; i++) {
     const int16_t v = micBuf_[i];
     const int32_t a = v < 0 ? -static_cast<int32_t>(v) : v;
@@ -287,23 +338,32 @@ void AgentVoiceActivity::pumpMic() {
     if (a > micPeak_) micPeak_ = static_cast<int16_t>(a);
   }
   micCount_ += static_cast<uint32_t>(n);
-  if (wsConnected_ && pcmBufferEmpty()) {
-    ws_.sendBIN(reinterpret_cast<uint8_t*>(micBuf_), static_cast<size_t>(n) * sizeof(int16_t));
-    bytesSent_ += static_cast<uint32_t>(n) * sizeof(int16_t);
+  // A transport that only became ready mid-utterance still claims the rest of it.
+  if (turnTransport_ == Transport::None) {
+    turnTransport_ = chooseTransport();
+    if (turnTransport_ != Transport::None) updateTransportIndicator();
+  }
+
+  if (turnTransport_ != Transport::None && pcmBufferEmpty()) {
+    if (!sendAudio(micBuf_, static_cast<size_t>(n))) framesDropped_++;
   } else {
-    // Either the socket is not up yet, or earlier audio is still draining.
-    // Live frames have to queue behind it either way, or the utterance reaches
-    // the service out of order.
+    // No transport yet, or earlier audio is still draining. Live frames queue
+    // behind it either way, or the utterance arrives out of order.
     bufferPcm(reinterpret_cast<const uint8_t*>(micBuf_), static_cast<size_t>(n) * sizeof(int16_t));
   }
 }
 
 void AgentVoiceActivity::startListening() {
   view_.clearDraft();
+  // Latched for the whole turn: audio captured for one transport must not be
+  // drained down another half way through an utterance.
+  turnTransport_ = chooseTransport();
+  updateTransportIndicator();
+  if (turnTransport_ == Transport::Ble) VoiceRelayPeripheral::instance().notifyTurnStart();
   releasePcmBuffer();  // anything left from a capture that never reached the wire
   pendingEnd_ = false;
-  dcState_ = 0;
-  dcPrimed_ = false;
+  conditioner_.reset();
+  encoder_.reset();
   gotTranscript_ = false;
   pendingMarker_ = '\0';
   pendingCount_ = 0;
@@ -318,6 +378,14 @@ void AgentVoiceActivity::startListening() {
   status_ = "Listening... (Up to stop)";
   LOG_INF("AVA", "listen start (ws=%d)", (int)wsConnected_);
   markDirty();
+}
+
+void AgentVoiceActivity::sendTurnEnd() {
+  if (turnTransport_ == Transport::Ble) {
+    VoiceRelayPeripheral::instance().notifyTurnStop();
+    return;
+  }
+  ws_.sendTXT("{\"type\":\"end\"}");
 }
 
 void AgentVoiceActivity::stopListening() {
@@ -377,7 +445,11 @@ bool AgentVoiceActivity::handleRailInput() {
 
   const auto swipe = mappedInput.wasSwipe();
   if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
-    view_.railScroll(swipe == MappedInputManager::SwipeDir::Up ? 1 : -1);
+    // A swipe moves nearly a screenful, keeping one row of overlap for context.
+    // Stepping a single row made a long conversation unreachable by swiping, and
+    // every step costs an e-ink refresh.
+    const int page = view_.railPageRows();
+    view_.railScroll(swipe == MappedInputManager::SwipeDir::Up ? page : -page);
     return true;
   }
 
@@ -442,8 +514,17 @@ void AgentVoiceActivity::openConversations() {
           requestUpdate();
           return;
         }
+        // No FilePathResult means the picker was dismissed rather than chosen
+        // from — a gesture back, say. Treating that as an empty path would have
+        // read as "start a new conversation", so backing out would have created
+        // one every time.
         const auto* choice = std::get_if<FilePathResult>(&result.data);
-        applyConversationChoice(choice ? choice->path : std::string());
+        if (choice == nullptr) {
+          view_.markFullPaint();
+          requestUpdate();
+          return;
+        }
+        applyConversationChoice(choice->path);
       });
 }
 
@@ -486,10 +567,18 @@ void AgentVoiceActivity::maybeRotateSession() {
 void AgentVoiceActivity::handlePaging() {
   if (handleRailInput()) return;
 
-  // Before anything that consumes SwipeDir::Left, since a right-edge swipe is
-  // also one of those.
+  // Both edge gestures are checked before ReaderUtils sees the swipe: an edge
+  // swipe is ALSO a plain SwipeDir, and in swipe-paging mode the page turn would
+  // otherwise swallow it.
   if (mappedInput.wasRightEdgeGesture()) {
     view_.openRail();
+    return;
+  }
+  // Left edge opens the conversations. It used to turn a page back, which the
+  // Up button already does — a duplicated binding on the one edge gesture a
+  // person is likely to try.
+  if (mappedInput.wasBackGesture()) {
+    openConversations();
     return;
   }
   if (handleTopBarTap()) return;
@@ -727,6 +816,7 @@ bool AgentVoiceActivity::handleVoiceButtons() {
 
 void AgentVoiceActivity::loop() {
   ws_.loop();
+  pumpBleAnswers();
   pumpLink();
   drainPcmBuffer();
   if (pendingEnd_ && wsConnected_ && pcmBufferEmpty()) {

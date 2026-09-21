@@ -56,6 +56,12 @@ class TranscriptView {
   // is drawn from primitives at the line height instead.
   enum class Link : uint8_t { Offline, Connecting, WifiUp, Online, Failed };
   void setLink(Link link);
+
+  // Which way a turn would travel right now. Bluetooth is preferred when a
+  // phone is linked, so the indicator has to say which one is carrying the
+  // conversation rather than implying there is only ever one.
+  enum class Transport : uint8_t { Wifi, Ble };
+  void setTransport(Transport transport);
   // Capture state, shown as a filled dot beside the status. Without it there is
   // no way to tell a live mic from a dead one.
   void setListening(bool listening);
@@ -100,6 +106,8 @@ class TranscriptView {
   RailHit railHitTest(int x, int y, uint16_t& turnIndex) const;
   // Scroll the rail's window by whole rows; returns true when it moved.
   bool railScroll(int rows);
+  // Rows a swipe should move: a screenful less one, kept for context.
+  int railPageRows() const;
   // The transcript underneath changed while the rail was up, so the stored
   // framebuffer is stale and closing must repaint rather than restore.
   void noteContentChangedUnderRail() { railContentChanged_ = true; }
@@ -186,6 +194,7 @@ class TranscriptView {
   void drawHeader() const;
   // Returns the width it occupied, so the status text knows where to stop.
   int drawLinkIndicator(int right, int top) const;
+  int drawBluetoothGlyph(int right, int top) const;
   void drawLine(size_t index) const;
   void drawFooter() const;
   int lineY(size_t index) const { return bodyTop_ + static_cast<int>(index) * lineAdvance_; }
@@ -205,6 +214,7 @@ class TranscriptView {
 
   // chrome
   Link link_ = Link::Offline;
+  Transport transport_ = Transport::Wifi;
   bool listening_ = false;
   std::string header_;
   std::string status_;
