@@ -3,6 +3,8 @@
 #include "activities/RenderLock.h"
 #include "CrossPointSettings.h"
 #include "activities/reader/ReaderUtils.h"
+#include "activities/settings/TextSettingsActivity.h"
+#include "SdCardFontSystem.h"
 
 #include <ArduinoJson.h>
 #include <BoardConfig.h>
@@ -329,8 +331,40 @@ void AgentVoiceActivity::stopListening() {
 // Collect a page-turn intent. Priority mirrors the reader: the menu gesture
 // (centre third) is claimed first so it can never double as a page turn, then
 // long-press variants, then a plain turn.
+// Swipe down from the top (or tap the centre third) opens the reader's own text
+// settings, so font size and layout are adjustable from the conversation. The
+// gesture, the menu and the re-flow are all existing machinery — this only
+// wires them together.
+void AgentVoiceActivity::openTextSettings() {
+  view_.endTurn();  // never leave a half-laid-out turn behind
+  spool_.endAgentTurn();
+  view_.clearDraft();
+
+  startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
+                                                               TextSettingsActivity::Tab::Size),
+                         [this](const ActivityResult&) {
+                           // A font, size or margin change is a new RenderSpec, which drops the
+                           // page index and rejects the persisted one; the spool is raw text and
+                           // is untouched. Re-laying out a long session takes real time (~9 s at
+                           // 49 turns), so say so rather than looking hung.
+                           status_ = "Re-flowing the conversation...";
+                           view_.begin();
+                           view_.setStatus(status_);
+                           requestUpdateAndWait();
+
+                           view_.restoreIndex();
+                           view_.jumpToLatest();
+                           status_ = "Power to talk  |  Up/Down pages  |  hold Down exits";
+                           nextIsPageTurn_ = true;
+                           requestUpdate();
+                         });
+}
+
 void AgentVoiceActivity::handlePaging() {
-  if (ReaderUtils::isTouchMenuGesture(renderer, mappedInput)) return;
+  if (ReaderUtils::isTouchMenuGesture(renderer, mappedInput)) {
+    openTextSettings();
+    return;
+  }
 
   // Touch only. ReaderUtils::detectPageTurn is deliberately NOT used here:
   // MappedInputManager maps PageBack/PageForward onto BTN_UP/BTN_DOWN, the same
@@ -467,9 +501,17 @@ void AgentVoiceActivity::pumpInjectedTurns() {
 bool AgentVoiceActivity::handleVoiceButtons() {
   const bool pttSerial = pttRequested_;
   pttRequested_ = false;
-  const bool powerTap =
-      mappedInput.wasReleased(MappedInputManager::Button::Power) && mappedInput.getHeldTime() < kPowerSleepHoldMs;
-  if (pttSerial || powerTap) {
+  // The Sticky wires OK/confirm and power/wake to the SAME GPIO4, and
+  // InputManager splits them by duration: a short click is delivered as
+  // CONFIRM, and only a hold past CONFIRM_POWER_HOLD_MS (400 ms) is delivered
+  // as POWER. Binding talk to Power alone therefore never fired for a tap,
+  // which is why the button appeared dead. A press emits exactly one of the
+  // two, so accepting both cannot double-toggle: tap -> Confirm, medium hold ->
+  // Power, and a hold long enough to mean sleep never reaches a release at all.
+  const bool talkTap = mappedInput.wasReleased(MappedInputManager::Button::Confirm) ||
+                       (mappedInput.wasReleased(MappedInputManager::Button::Power) &&
+                        mappedInput.getHeldTime() < kPowerSleepHoldMs);
+  if (pttSerial || talkTap) {
     // Talking is always about the live tail: snap forward before capturing so a
     // reply never streams onto a page the reader has paged away from.
     pendingJumpLatest_ = true;

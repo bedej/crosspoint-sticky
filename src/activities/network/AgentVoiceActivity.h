@@ -55,10 +55,11 @@ class AgentVoiceActivity : public Activity {
   // Keep the device awake and the loop hot while a conversation is live.
   bool preventAutoSleep() override { return state_ != State::Idle && state_ != State::Error; }
   bool skipLoopDelay() override { return wsConnected_; }
-  // Power is push-to-talk here. The stock 400 ms hold-to-sleep is shorter than
-  // a deliberate press, so pressing to talk slept the device instead — and the
-  // retained sleep frame made it look like nothing had happened at all. A hold
-  // this long is unambiguous, and still sleeps.
+  // The AI-Voice button is push-to-talk here, and on this board it is the same
+  // GPIO as power/wake. The stock 400 ms hold-to-sleep is shorter than a
+  // deliberate press, so a slightly long press would sleep the device mid
+  // conversation — and the retained sleep frame makes that look like nothing
+  // happening at all. A hold this long is unambiguous, and still sleeps.
   unsigned long powerHoldSleepMs() const override { return kPowerSleepHoldMs; }
   static constexpr unsigned long kPowerSleepHoldMs = 1500;
 
@@ -94,6 +95,7 @@ class AgentVoiceActivity : public Activity {
   // button mapping and the turn guard all come from ReaderUtils/EpubReader so a
   // conversation feels identical to a book.
   bool handleVoiceButtons();  // returns true when the activity finished
+  void openTextSettings();
   void handlePaging();
   void applyPendingTurn();
   void openSpoolTurn(ConversationSpool::Role role, const char* text);
