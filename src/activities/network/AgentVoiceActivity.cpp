@@ -79,8 +79,13 @@ AgentVoiceActivity::Transport AgentVoiceActivity::chooseTransport() const {
 }
 
 void AgentVoiceActivity::updateTransportIndicator() {
-  const bool ble = VoiceRelayPeripheral::supported() && VoiceRelayPeripheral::instance().isStreaming();
-  view_.setTransport(ble ? TranscriptView::Transport::Ble : TranscriptView::Transport::Wifi);
+  // While a turn is in flight the indicator shows the LATCHED transport, not
+  // live availability: a phone that links mid-utterance must not make the screen
+  // claim the turn is going somewhere it is not. At rest it shows what WOULD
+  // carry a turn, so a phone linking while idle is visible before you speak.
+  Transport shown = turnTransport_;
+  if (shown == Transport::None) shown = chooseTransport();
+  view_.setTransport(shown == Transport::Ble ? TranscriptView::Transport::Ble : TranscriptView::Transport::Wifi);
 }
 
 bool AgentVoiceActivity::sendAudio(const int16_t* pcm, const size_t count) {
@@ -115,6 +120,8 @@ void AgentVoiceActivity::pumpBleAnswers() {
 // Association progress, watched from the loop instead of waited on.
 void AgentVoiceActivity::pumpLink() {
   if (state_ == State::Error) return;
+  // Cheap: setTransport() only marks a repaint when the value actually changes.
+  updateTransportIndicator();
 
   if (WiFi.status() == WL_CONNECTED) {
     if (!wsStarted_) {
@@ -711,6 +718,12 @@ void AgentVoiceActivity::pumpInjectedTurns() {
     }
   }
 
+  if (pickerRequested_) {
+    pickerRequested_ = false;
+    openConversations();
+    return;  // the picker owns the screen now
+  }
+
   if (newConversationRequested_) {
     newConversationRequested_ = false;
     applyConversationChoice(std::string());
@@ -838,6 +851,7 @@ void AgentVoiceActivity::loop() {
   // nothing) surface an error instead of hanging on "Thinking...".
   if (state_ == State::Answering && millis() - lastServerMs_ > kStallTimeoutMs) {
     LOG_ERR("AVA", "answer stalled >%lums, resetting", kStallTimeoutMs);
+    turnTransport_ = Transport::None;
     view_.clearDraft();
     state_ = State::Idle;
     status_ = "No response. Press Up to try again.";
@@ -899,6 +913,7 @@ void AgentVoiceActivity::appendAnswerText(const char* text) {
 }
 
 void AgentVoiceActivity::finishAnswer() {
+  turnTransport_ = Transport::None;  // the next turn chooses afresh
   // A marker run still open at the end resolves now; route it through the spool
   // and the view like any other delta rather than letting it sit in answer_.
   const size_t before = answer_.length();
@@ -1017,6 +1032,7 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     finishAnswer();
   } else if (!strcmp(t, "error")) {
     LOG_ERR("AVA", "server error: %s", static_cast<const char*>(doc["message"] | ""));
+    turnTransport_ = Transport::None;
     view_.clearDraft();
     state_ = State::Idle;  // don't strand the user in "Thinking..."
     status_ = std::string("Error: ") + static_cast<const char*>(doc["message"] | "");

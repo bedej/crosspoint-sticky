@@ -385,7 +385,7 @@ namespace {
 // Bumped whenever the on-disk layout below changes, so a stale file is
 // rejected rather than misread.
 constexpr uint32_t kIndexMagic = 0x58444953;  // "SIDX"
-constexpr uint8_t kIndexVersion = 2;  // v2 adds the turn table
+constexpr uint8_t kIndexVersion = 2;          // v2 adds the turn table
 
 struct IndexHeader {
   uint32_t magic;
@@ -406,9 +406,7 @@ struct IndexHeader {
 };
 }  // namespace
 
-std::string ConversationSpool::indexPath() const {
-  return std::string(kSessionDir) + "/" + sessionId_ + ".idx";
-}
+std::string ConversationSpool::indexPath() const { return std::string(kSessionDir) + "/" + sessionId_ + ".idx"; }
 
 bool ConversationSpool::saveIndex(const IndexCursor& cursor) const {
   if (!open_) return false;
@@ -591,8 +589,7 @@ bool ConversationSpool::readSummary(const std::string& id, Summary& out) {
   if (!Storage.openFileForRead("SPOOL", path, f) || !f) return false;
 
   IndexHeader h{};
-  if (f.read(&h, sizeof(h)) != static_cast<int>(sizeof(h)) || h.magic != kIndexMagic ||
-      h.version != kIndexVersion) {
+  if (f.read(&h, sizeof(h)) != static_cast<int>(sizeof(h)) || h.magic != kIndexMagic || h.version != kIndexVersion) {
     f.close();
     return false;  // never indexed, or indexed by an older build
   }
@@ -619,11 +616,18 @@ bool ConversationSpool::readSummary(const std::string& id, Summary& out) {
     }
   }
 
-  // And the newest timestamp, for "2 hours ago".
-  const size_t lastEntry = tableStart + static_cast<size_t>(h.turnRefCount - 1) * sizeof(TurnRef);
-  if (f.seek(lastEntry)) {
+  // The newest timestamp, for "2 hours ago" and for ordering the picker. Walk
+  // back from the end rather than reading only the final entry: a clock that
+  // synced part way through a session leaves its later turns stamped and its
+  // earlier ones not, and vice versa if the RTC was lost.
+  constexpr uint32_t kEpochProbe = 8;
+  const uint32_t back = h.turnRefCount < kEpochProbe ? h.turnRefCount : kEpochProbe;
+  for (uint32_t i = 1; i <= back && out.lastEpoch == 0; ++i) {
+    const size_t entry = tableStart + static_cast<size_t>(h.turnRefCount - i) * sizeof(TurnRef);
+    if (!f.seek(entry)) break;
     TurnRef ref;
-    if (f.read(&ref, sizeof(ref)) == static_cast<int>(sizeof(ref))) out.lastEpoch = ref.epoch;
+    if (f.read(&ref, sizeof(ref)) != static_cast<int>(sizeof(ref))) break;
+    out.lastEpoch = ref.epoch;
   }
   f.close();
   return true;

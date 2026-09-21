@@ -59,8 +59,6 @@ void ConversationPickerActivity::onEnter() {
 void ConversationPickerActivity::reload() {
   sessions_.clear();
   std::vector<std::string> ids = ConversationSpool::listSessionIds();
-  // Newest first: ids are allocated in order, so this is reverse-chronological.
-  std::reverse(ids.begin(), ids.end());
   for (const std::string& id : ids) {
     ConversationSpool::Summary summary;
     if (!ConversationSpool::readSummary(id, summary)) {
@@ -71,6 +69,19 @@ void ConversationPickerActivity::reload() {
     }
     sessions_.push_back(std::move(summary));
   }
+
+  // Most recently SPOKEN IN first, which is not the same as most recently
+  // created — resuming an old conversation should float it back to the top.
+  //
+  // A session whose turns carry no trustworthy timestamp has no age to sort by,
+  // so those sink below the dated ones and keep newest-created order among
+  // themselves. A brand-new empty conversation lands there too, having no turns
+  // yet; the cursor still opens on whichever one is current.
+  std::sort(sessions_.begin(), sessions_.end(),
+            [](const ConversationSpool::Summary& a, const ConversationSpool::Summary& b) {
+              if (a.lastEpoch != b.lastEpoch) return a.lastEpoch > b.lastEpoch;
+              return a.id > b.id;
+            });
   rebuildRows();
 }
 

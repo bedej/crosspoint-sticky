@@ -60,6 +60,9 @@ class AgentVoiceActivity : public Activity {
   static void requestRailRow(int row) { railRowRequested_ = row; }
   static void requestNewConversation() { newConversationRequested_ = true; }
   static void requestSessionList() { sessionListRequested_ = true; }
+  // Opens the real picker, so a screenshot shows the rows as ORDERED and
+  // rendered rather than a parallel listing that could disagree with them.
+  static void requestPicker() { pickerRequested_ = true; }
   void render(RenderLock&&) override;
 
   // Keep the device awake and the loop hot while a conversation is live.
@@ -88,6 +91,7 @@ class AgentVoiceActivity : public Activity {
   static inline volatile int railRowRequested_ = -1;
   static inline volatile bool newConversationRequested_ = false;
   static inline volatile bool sessionListRequested_ = false;
+  static inline volatile bool pickerRequested_ = false;
   void pumpInjectedTurns();
   enum class State { Connecting, Idle, Listening, Answering, Error };
 

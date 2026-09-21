@@ -679,6 +679,8 @@ void loop() {
         AgentVoiceActivity::requestRailRow(cmd.substring(8).toInt());
       } else if (cmd == "NEWCONV") {
         AgentVoiceActivity::requestNewConversation();
+      } else if (cmd == "PICKER") {
+        AgentVoiceActivity::requestPicker();
       } else if (cmd == "CONVS") {
         AgentVoiceActivity::requestSessionList();
       } else if (cmd == "PAGELATEST") {
