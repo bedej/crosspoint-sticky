@@ -193,6 +193,28 @@ Confirm against the backend rather than the device alone. `docker logs voice-app
 prints `turn complete ... samples=N` per session; a session with `samples=0` and
 `ended_explicitly=true` is something ending a turn it never fed any audio.
 
+### Forgetting a phone is two-sided
+
+The device can erase its own keys; it cannot erase the phone's. iOS exposes no
+API for dropping a bond, so a phone that keeps its half will connect, try to
+encrypt with a key this device no longer holds, fail, and never pair again —
+silently, with nothing shown at either end. Whenever bonds are cleared on the
+device, the phone must be told too: Settings > Bluetooth > Sticky > Forget This
+Device. The connectivity screen says so after a forget, for 20 seconds.
+
+The same asymmetry is why erasing bonds on every boot broke pairing, and why a
+test that clears bonds leaves the link down until someone touches the phone.
+
+### NVS on a render path fights the BLE link
+
+NimBLE writes its own bond and CCCD records to NVS whenever a phone is
+connected. A screen that opens an NVS namespace on every render — or on a
+one-second poll — is contending with the live link, and the failure is a crash
+or a silent reboot rather than an error: roughly three entries in four with a
+phone connected, and none at all with the radio idle. If a screen looks like it
+only crashes "when Bluetooth is up", look for NVS reads in the paint path
+before suspecting the stack. Cache the value and warm it at init.
+
 ## Flashing the Sticky
 
 - **`upload_speed = 460800`, not 921600.** The CH343 bridge fails to sync at
