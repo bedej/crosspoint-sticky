@@ -516,42 +516,40 @@ bool TranscriptView::jumpToLatest() {
 // ---------------------------------------------------------------------------
 // drawing
 
-// Bars only mean signal once there IS a link. While the radio is still coming
-// up, filled-in bars read as "connected, weak" — which is the opposite of the
-// truth — so those states say so in words instead.
+// Four distinct glyphs, all drawn from primitives at the height of the status
+// line. The 32x32 WifiIcon asset is no use here: drawIcon() does not scale and
+// its orientation mapping assumes the forced-Portrait UI themes.
+//
+// Bars only mean SIGNAL, and only once a link exists. Drawing a partially
+// filled bar stack while the radio is still associating reads as "connected,
+// weak" — the opposite of the truth — so the two states that have no link do
+// not use bars at all:
+//
+//   connecting  three dots, the usual "working on it"
+//   no link     hollow bars struck through
+//   associated  two filled bars (socket still opening)
+//   online      three filled bars
 int TranscriptView::drawLinkIndicator(const int right, const int top) const {
-  const char* label = nullptr;
-  int filled = 0;
-  switch (link_) {
-    case Link::Connecting:
-      label = "connecting";
-      break;
-    case Link::Failed:
-      label = "no wi-fi";
-      break;
-    case Link::Offline:
-      label = "offline";
-      break;
-    case Link::WifiUp:
-      filled = 2;  // associated, socket not up yet
-      break;
-    case Link::Online:
-      filled = 3;
-      break;
-  }
-
-  if (label != nullptr) {
-    const int w = renderer_.getTextAdvanceX(UI_10_FONT_ID, label, EpdFontFamily::REGULAR);
-    renderer_.drawText(UI_10_FONT_ID, right - w, top, label);
-    return w;
-  }
-
   constexpr int kBars = 3;
   constexpr int kBarW = 4;
   constexpr int kGap = 2;
   const int height = std::max(6, uiLineH_ - 4);
   const int width = kBars * kBarW + (kBars - 1) * kGap;
   const int x0 = right - width;
+
+  if (link_ == Link::Connecting) {
+    const int dot = std::max(2, height / 5);
+    const int y = top + (height - dot) / 2;
+    for (int i = 0; i < 3; ++i) {
+      renderer_.fillRect(x0 + i * (width - dot) / 2, y, dot, dot, true);
+    }
+    return width;
+  }
+
+  int filled = 0;
+  if (link_ == Link::WifiUp) filled = 2;
+  if (link_ == Link::Online) filled = 3;
+
   for (int i = 0; i < kBars; ++i) {
     const int barH = (height * (i + 1)) / kBars;
     const int x = x0 + i * (kBarW + kGap);
@@ -561,6 +559,12 @@ int TranscriptView::drawLinkIndicator(const int right, const int top) const {
     } else {
       renderer_.drawRect(x, y, kBarW, barH, true);
     }
+  }
+
+  // Offline and Failed both mean "no link"; the stroke is what separates them
+  // from a stack that is merely empty so far.
+  if (link_ == Link::Offline || link_ == Link::Failed) {
+    renderer_.drawLine(x0 - 1, top + height, x0 + width, top - 1, 2, true);
   }
   return width;
 }
