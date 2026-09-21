@@ -231,13 +231,22 @@ bool VoiceRelayPeripheral::begin(const char* deviceName) {
   // Every characteristic requires an encrypted link. Without this a central can
   // connect unbonded and subscribe to the microphone — which is what an earlier
   // build allowed, and is a live mic anyone in range can listen to.
-  s.audioUp = svc->createCharacteristic(kAudioUpUuid, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ_ENC);
+  // READ as well as READ_ENC, and it matters which error a read returns: with
+  // READ_ENC alone the characteristic is not readable at all, so an attempt
+  // fails with "read not permitted" and the phone learns nothing. With both, it
+  // fails with "insufficient authentication", which is what makes iOS start
+  // pairing — the phone has no other way to be told this link must be
+  // encrypted, because subscribing to a notify characteristic is NOT gated by
+  // the stack (verified: an unencrypted central subscribed successfully).
+  s.audioUp = svc->createCharacteristic(
+      kAudioUpUuid, NIMBLE_PROPERTY::NOTIFY | NIMBLE_PROPERTY::READ | NIMBLE_PROPERTY::READ_ENC);
   s.audioUp->setCallbacks(new AudioUpCallbacks());
-  s.control = svc->createCharacteristic(kControlUuid,
-                                        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
+  s.control = svc->createCharacteristic(kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR |
+                                                           NIMBLE_PROPERTY::WRITE_ENC | NIMBLE_PROPERTY::NOTIFY);
   s.control->setCallbacks(new InboundCallbacks());
   // The phone is the central, so device-bound messages are WRITES, not notifies.
-  s.answerDown = svc->createCharacteristic(kAnswerDownUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  s.answerDown = svc->createCharacteristic(
+      kAnswerDownUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::WRITE_ENC);
   s.answerDown->setCallbacks(new InboundCallbacks());
   svc->start();
 
