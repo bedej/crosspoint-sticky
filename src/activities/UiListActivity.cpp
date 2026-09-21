@@ -49,23 +49,6 @@ bool UiListActivity::handleButtons() {
     onBackButton();
     return true;
   }
-  // Back is the only exit this base class offers, and not every board has a
-  // Back button to offer it with: the Sticky's InputPins.back is unassigned
-  // (its back/left/right "come from touch"), which leaves every list screen
-  // built on this class inescapable — the reader's text settings included.
-  // CrossPoint's standard back gesture is the left-edge swipe, so fall back to
-  // it there. Gated on the board rather than applied everywhere, so boards that
-  // do have a Back button keep that edge free for whatever else wants it.
-  // The menu gesture (wasMenuGesture() IS the top-edge down swipe) closes as
-  // well as opens. It is the gesture that
-  // opens the reader menu and the transcript's text settings, and repeating it
-  // is far more discoverable than knowing the left edge exists. On a board with
-  // a frontlight, ActivityManager claims that swipe for the light panel before
-  // an activity sees it, so this simply never fires there.
-  if (BoardConfig::ACTIVE.input.back < 0 && (mappedInput.wasBackGesture() || mappedInput.wasMenuGesture())) {
-    onBackButton();
-    return true;
-  }
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
     const int selected = activeNav().selected;
     if (selected >= 0 && selected < listCount()) activateIndex(selected);
@@ -97,8 +80,37 @@ void UiListActivity::moveSelectionTo(const int index) {
   requestUpdate();
 }
 
+// True when the user asked to leave this screen by gesture. Back is the only
+// exit this class offers, and not every board has a Back button to offer it
+// with: the Sticky's InputPins.back is unassigned (its own BoardConfig comment
+// says back/left/right "come from touch"), so Button::Back can never fire and
+// every list screen is a dead end — the reader's text settings included.
+//
+// Two gestures count: CrossPoint's standard left-edge back swipe, and the menu
+// gesture, which IS the top-edge down swipe. Accepting the latter means the
+// swipe that OPENS the reader menu and the transcript's text settings also
+// closes them, which is far more discoverable than knowing the left edge is
+// there.
+//
+// Gated on the board, so boards with a physical Back button keep both edges
+// free. On a board with a frontlight, ActivityManager claims the top-edge swipe
+// for the light panel before any activity sees it, so this never fires there.
+bool UiListActivity::wasDismissRequested() const {
+  if (BoardConfig::ACTIVE.input.back >= 0) return false;
+  return mappedInput.wasBackGesture() || mappedInput.wasMenuGesture();
+}
+
 void UiListActivity::loop() {
   if (handleCustomInput()) return;
+  // Checked HERE rather than in handleButtons(), which around ten subclasses
+  // override without chaining to this base — TextSettingsActivity among them.
+  // A fix inside handleButtons() is dead code for every one of them, so it has
+  // to sit above the overrides. handleCustomInput() still runs first, so an
+  // open popup consumes the gesture before the screen does.
+  if (wasDismissRequested()) {
+    onBackButton();
+    return;
+  }
   if (handleButtons()) return;
   if (routeListTouch()) return;
 

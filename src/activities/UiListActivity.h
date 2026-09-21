@@ -58,6 +58,8 @@ class UiListActivity : public Activity, protected UiAppHost {
   // variants. Return true when a button consumed the pass.
   virtual bool handleButtons();
   virtual void onBackButton() { finish(); }
+  // Gesture exit for boards with no Back button; see the definition.
+  bool wasDismissRequested() const;
   // Header band, drawn before the app renders. Default paints GUI.drawHeader
   // with headerTitle(); override either for custom chrome.
   virtual const char* headerTitle() const { return nullptr; }
