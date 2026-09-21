@@ -1,5 +1,6 @@
 #include "UiListActivity.h"
 
+#include <BoardConfig.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 
@@ -45,6 +46,23 @@ void UiListActivity::onRowAction(const fui::ActionEvent& event) {
 
 bool UiListActivity::handleButtons() {
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    onBackButton();
+    return true;
+  }
+  // Back is the only exit this base class offers, and not every board has a
+  // Back button to offer it with: the Sticky's InputPins.back is unassigned
+  // (its back/left/right "come from touch"), which leaves every list screen
+  // built on this class inescapable — the reader's text settings included.
+  // CrossPoint's standard back gesture is the left-edge swipe, so fall back to
+  // it there. Gated on the board rather than applied everywhere, so boards that
+  // do have a Back button keep that edge free for whatever else wants it.
+  // The menu gesture (wasMenuGesture() IS the top-edge down swipe) closes as
+  // well as opens. It is the gesture that
+  // opens the reader menu and the transcript's text settings, and repeating it
+  // is far more discoverable than knowing the left edge exists. On a board with
+  // a frontlight, ActivityManager claims that swipe for the light panel before
+  // an activity sees it, so this simply never fires there.
+  if (BoardConfig::ACTIVE.input.back < 0 && (mappedInput.wasBackGesture() || mappedInput.wasMenuGesture())) {
     onBackButton();
     return true;
   }
