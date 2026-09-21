@@ -403,7 +403,17 @@ void AgentVoiceActivity::stopListening() {
   // finalises (its recogniser keeps accumulating into the next utterance) and
   // the device's own empty socket session answers "I didn't catch that", which
   // then overwrites the real transcript on screen.
-  sendTurnEnd();
+  //
+  // ...but not before the audio it terminates has actually gone. Talking before
+  // a link is up buffers the utterance, and an end marker sent now would
+  // overtake frames still draining — the same out-of-order failure, just on the
+  // right transport. loop() releases it once the buffer is empty and a
+  // transport is ready.
+  if (!pcmBufferEmpty() || turnTransport_ == Transport::None) {
+    pendingEnd_ = true;
+  } else {
+    sendTurnEnd();
+  }
   state_ = State::Answering;
   status_ = "Thinking...";
   lastServerMs_ = millis();  // arm the stall watchdog

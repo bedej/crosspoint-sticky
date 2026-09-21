@@ -658,6 +658,8 @@ void loop() {
         esp_restart();
       } else if (cmd == "VOICE") {
         activityManager.goToVoice();
+      } else if (cmd == "CONN") {
+        activityManager.goToConnectivity();
       } else if (cmd == "PTT") {
         AgentVoiceActivity::requestPushToTalk();
       } else if (cmd.startsWith("ASK ")) {

@@ -85,6 +85,9 @@ class ActivityManager {
   void goToUsbDrive();
   void goToSettings();
   void goToVoice();
+  // Bluetooth + Wi-Fi control (HomeLab-iv0). Reachable from the voice screen's
+  // menu gesture; also CMD:CONN over serial, which is how it is tested.
+  void goToConnectivity();
   void goToFileBrowser(std::string path = {});
   void goToRecentBooks();
   void goToBrowser();
