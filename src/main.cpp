@@ -40,6 +40,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
+#include "platform/BleVoiceSelftest.h"
 #include "platform/MicSelftest.h"
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
@@ -368,6 +369,10 @@ void setup() {
 
 #ifdef VOICE_MIC_SELFTEST
   runMicSelftest();
+#endif
+
+#ifdef VOICE_BLE_SELFTEST
+  runBleVoiceSelftest();
 #endif
 
   HalSystem::begin();
