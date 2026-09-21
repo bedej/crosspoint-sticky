@@ -26,6 +26,15 @@ CssTextAlign toCssAlign(const uint8_t align) {
 // rather than left to look like something the agent said.
 constexpr char kUserMarker[] = ">";
 
+// Query rail geometry. Wide enough that a whole question sits on ONE line and
+// is not ellipsised either — wrapping made the rail hard to scan, and truncating
+// defeats the point of showing the question at all. Sized so the full 20-byte
+// snippet fits beside the ordinal at UI_10. Half the panel is a lot, but the
+// rail is a transient overlay and the transcript behind it is only context.
+constexpr int kRailWidth = 240;
+constexpr int kRailPad = 5;
+constexpr int kRailOrdinal = 18;
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -346,11 +355,43 @@ void TranscriptView::saveIndex() const {
 }
 
 void TranscriptView::restoreIndex() {
-  if (!ready() || spool_.isEmpty()) return;
+  if (!ready()) return;
+
+  // Adopting a spool means adopting its line numbering from zero. Without this,
+  // switching to a conversation carried the PREVIOUS one's counter: a brand-new
+  // session began at line 531 and put its first page 23 pages in, because
+  // begin() only resets these when the render spec changes and the early return
+  // below skipped them entirely for an empty spool.
+  lines_.clear();
+  pendingFrom_ = 0;
+  docLine_ = 0;
+  livePage_ = 0;
+  curPage_ = 0;
+  liveTurnOffset_ = 0;
+  liveTurnIndex_ = 0;
+  liveTurnLine_ = 0;
+  liveTurnRefd_ = false;
+  clearDraft();
+  fullPaint_ = true;
+
+  if (spool_.isEmpty()) return;
   const unsigned long started = millis();
 
   ConversationSpool::IndexCursor cursor;
-  if (spool_.loadIndex(cursor)) {
+  bool loaded = spool_.loadIndex(cursor);
+  if (loaded && linesPerPage_ > 0) {
+    // The line count and the page count have to agree. They disagreed for real:
+    // indexes written before the session-switch fix carry the PREVIOUS
+    // conversation's line counter, which shows up as a footer promising pages
+    // that do not exist. Distrust the cursor and rebuild rather than inherit it.
+    const uint32_t implied = static_cast<uint32_t>(spool_.pageCount()) * linesPerPage_;
+    if (cursor.docLine > implied) {
+      LOG_INF("TVIEW", "index cursor implausible (%u lines vs %u pages), rebuilding",
+              static_cast<unsigned>(cursor.docLine), static_cast<unsigned>(spool_.pageCount()));
+      loaded = false;
+    }
+  }
+  if (loaded) {
     // Everything before the cursor is already indexed; lay out only what has
     // been appended since. Usually nothing, which is the whole point.
     rebuildIndexFrom(cursor.spoolOffset, cursor.turnIndex, cursor.docLine);
@@ -462,6 +503,185 @@ void TranscriptView::eraseFrom(const size_t lineIndex) const {
   const int top = lineY(lineIndex);
   const int bottom = footerTop_ - kChromeGap;
   if (bottom > top) renderer_.fillRect(0, top, renderer_.getScreenWidth(), bottom - top, false);
+}
+
+// ---------------------------------------------------------------------------
+// query rail
+
+int TranscriptView::railTopY() const { return kEdge + uiLineH_ + kChromeGap + 1; }
+int TranscriptView::railBottomY() const { return footerTop_ - kChromeGap; }
+
+int TranscriptView::railRowHeight() const { return uiLineH_ + kRailPad * 2; }
+
+size_t TranscriptView::railVisibleRows() const {
+  const int usable = railBottomY() - railTopY() - railRowHeight();  // less the header row
+  if (usable <= 0 || railRowHeight() <= 0) return 0;
+  return static_cast<size_t>(usable / railRowHeight());
+}
+
+void TranscriptView::buildRailRows() {
+  railRows_.clear();
+  // The rail lists the QUESTIONS, so agent turns are skipped. The table is built
+  // by the index rebuild, so this costs no file reads.
+  for (size_t i = 0; i < spool_.turnRefCount(); ++i) {
+    if (spool_.turnRef(i).role == static_cast<uint8_t>(Role::User)) {
+      railRows_.push_back(static_cast<uint16_t>(i));
+    }
+  }
+  // Open on the most recent questions: that is where the conversation is.
+  const size_t visible = railVisibleRows();
+  railTop_ = railRows_.size() > visible ? railRows_.size() - visible : 0;
+}
+
+void TranscriptView::openRail() {
+  if (railOpen_ || !ready()) return;
+  buildRailRows();
+  // Snapshot the page so closing is a restore rather than a re-render. The
+  // reader's toolbar does exactly this; re-rendering here is both slow and
+  // visibly wrong (EpubReaderActivity's own comment on the same pattern).
+  railStored_ = renderer_.storeBwBuffer();
+  railContentChanged_ = false;
+  railOpen_ = true;
+  drawRail();
+  renderer_.displayBuffer(HalDisplay::FAST_REFRESH);
+}
+
+void TranscriptView::closeRail() {
+  if (!railOpen_) return;
+  railOpen_ = false;
+  railRows_.clear();
+
+  if (railStored_ && !railContentChanged_) {
+    railStored_ = false;
+    // false is load-bearing: the glass is showing the rail, painted AFTER the
+    // store, and resyncing the baseline would treat it as already erased and
+    // leave it on the panel (GfxRenderer.h:342-348).
+    renderer_.restoreBwBuffer(/*resyncPanelBaseline=*/false);
+    renderer_.displayBuffer(HalDisplay::FAST_REFRESH);
+    return;
+  }
+
+  // The page moved on underneath, so the snapshot is a lie — drop it and repaint.
+  if (railStored_) {
+    railStored_ = false;
+    renderer_.discardStoredBwBuffer();
+  }
+  railContentChanged_ = false;
+  fullPaint_ = true;
+}
+
+bool TranscriptView::railScroll(const int rows) {
+  if (!railOpen_ || rows == 0) return false;
+  const size_t visible = railVisibleRows();
+  if (railRows_.size() <= visible) return false;
+  const size_t maxTop = railRows_.size() - visible;
+  size_t next = railTop_;
+  if (rows < 0) {
+    const size_t back = static_cast<size_t>(-rows);
+    next = back > railTop_ ? 0 : railTop_ - back;
+  } else {
+    next = railTop_ + static_cast<size_t>(rows);
+    if (next > maxTop) next = maxTop;
+  }
+  if (next == railTop_) return false;
+  railTop_ = next;
+  drawRail();
+  renderer_.displayBuffer(HalDisplay::FAST_REFRESH);
+  return true;
+}
+
+TranscriptView::RailHit TranscriptView::railHitTest(const int x, const int y, uint16_t& turnIndex) const {
+  if (!railOpen_) return RailHit::None;
+  const int left = renderer_.getScreenWidth() - kRailWidth;
+  if (x < left) return RailHit::Dismiss;  // tapped the conversation, not the rail
+
+  const int headerBottom = railTopY() + railRowHeight();
+  if (y < headerBottom) return RailHit::Conversations;
+
+  const int row = (y - headerBottom) / railRowHeight();
+  if (row < 0) return RailHit::None;
+  const size_t index = railTop_ + static_cast<size_t>(row);
+  if (index >= railRows_.size()) return RailHit::None;
+  turnIndex = spool_.turnRef(railRows_[index]).turnIndex;
+  return RailHit::Turn;
+}
+
+void TranscriptView::drawRail() {
+  const int screenW = renderer_.getScreenWidth();
+  const int left = screenW - kRailWidth;
+  const int top = railTopY();
+  const int bottom = railBottomY();
+  const int rowH = railRowHeight();
+
+  renderer_.fillRect(left, top, kRailWidth, bottom - top, false);  // clear the strip
+  renderer_.fillRect(left, top, 1, bottom - top, true);            // and rule it off
+
+  // Header: the way through to the other conversations. Wrapped-and-truncated
+  // rather than drawn raw — an unclipped drawText runs off the right edge, the
+  // same way the status line did.
+  {
+    const auto label = renderer_.wrappedText(UI_10_FONT_ID, "Conversations", kRailWidth - kRailPad * 2, 1);
+    if (!label.empty()) renderer_.drawText(UI_10_FONT_ID, left + kRailPad, top + kRailPad, label.front().c_str());
+  }
+  renderer_.fillRect(left, top + rowH - 1, kRailWidth, 1, true);
+
+  const uint16_t currentTurn = spool_.pageCount() ? spool_.page(curPage_).turnIndex : 0;
+  const size_t visible = railVisibleRows();
+  int y = top + rowH;
+
+  for (size_t i = 0; i < visible; ++i) {
+    const size_t index = railTop_ + i;
+    if (index >= railRows_.size()) break;
+    const ConversationSpool::TurnRef& ref = spool_.turnRef(railRows_[index]);
+
+    // A question is "current" until the next one starts, so the agent's reply to
+    // it counts as still being inside it.
+    uint16_t nextTurn = 0xFFFF;
+    if (index + 1 < railRows_.size()) nextTurn = spool_.turnRef(railRows_[index + 1]).turnIndex;
+    const bool active = currentTurn >= ref.turnIndex && currentTurn < nextTurn;
+
+    if (active) renderer_.fillRect(left + 1, y, kRailWidth - 1, rowH, true);
+    const bool ink = !active;  // invert the text on the filled row
+
+    char ordinal[8];
+    snprintf(ordinal, sizeof(ordinal), "%u", static_cast<unsigned>(index + 1));
+    const int ordW = renderer_.getTextAdvanceX(UI_10_FONT_ID, ordinal, EpdFontFamily::REGULAR);
+    renderer_.drawRect(left + kRailPad, y + kRailPad, kRailOrdinal, kRailOrdinal, ink);
+    renderer_.drawText(UI_10_FONT_ID, left + kRailPad + (kRailOrdinal - ordW) / 2, y + kRailPad + 1, ordinal, ink);
+
+    const int textLeft = left + kRailPad + kRailOrdinal + 4;
+    const int textW = screenW - kEdge - textLeft;
+    if (textW > 0 && ref.snippet[0] != '\0') {
+      // One line per question: truncated with an ellipsis rather than wrapped,
+      // so every row is the same height and the rail scans top to bottom.
+      const auto lines = renderer_.wrappedText(UI_10_FONT_ID, ref.snippet, textW, 1);
+      if (!lines.empty()) renderer_.drawText(UI_10_FONT_ID, textLeft, y + kRailPad, lines.front().c_str(), ink);
+    }
+    y += rowH;
+  }
+
+  // Say so rather than silently showing a window: there is no scrollbar here.
+  if (railRows_.size() > visible) {
+    char more[24];
+    snprintf(more, sizeof(more), "%u earlier", static_cast<unsigned>(railTop_));
+    if (railTop_ > 0) renderer_.drawText(UI_10_FONT_ID, left + kRailPad, bottom - uiLineH_, more);
+  }
+}
+
+bool TranscriptView::railRowTurn(const size_t row, uint16_t& turnIndex) const {
+  const size_t index = railTop_ + row;
+  if (!railOpen_ || index >= railRows_.size()) return false;
+  turnIndex = spool_.turnRef(railRows_[index]).turnIndex;
+  return true;
+}
+
+bool TranscriptView::jumpToTurn(const uint16_t turnIndex) {
+  if (spool_.pageCount() == 0) return false;
+  const size_t target = pageWhereTurnStarts(turnIndex);
+  if (target == curPage_) return false;
+  curPage_ = target;
+  loadPage(curPage_);
+  return true;
 }
 
 // ---------------------------------------------------------------------------

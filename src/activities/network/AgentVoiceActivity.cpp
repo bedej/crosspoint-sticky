@@ -4,6 +4,8 @@
 #include "CrossPointSettings.h"
 #include "activities/reader/ReaderUtils.h"
 #include "activities/settings/TextSettingsActivity.h"
+#include "activities/transcript/ConversationPickerActivity.h"
+#include <HalClock.h>
 #include "SdCardFontSystem.h"
 
 #include <ArduinoJson.h>
@@ -231,6 +233,7 @@ void AgentVoiceActivity::onEnter() {
   view_.begin();
   pagesUntilFullRefresh_ = SETTINGS.getRefreshFrequency();
   if (spool_.begin()) {
+    maybeRotateSession();
     view_.restoreIndex();
     view_.jumpToLatest();
     LOG_INF("AVA", "session %s: %u turns, %u pages", spool_.sessionId().c_str(),
@@ -360,7 +363,137 @@ void AgentVoiceActivity::openTextSettings() {
                          });
 }
 
+// While the rail is up it owns touch. Returns true when it consumed the input,
+// so the caller does not also page.
+bool AgentVoiceActivity::handleRailInput() {
+  if (!view_.railOpen()) return false;
+
+  // The same edge gesture closes it — symmetry beats having to find the outside.
+  if (mappedInput.wasRightEdgeGesture()) {
+    view_.closeRail();
+    requestUpdate();
+    return true;
+  }
+
+  const auto swipe = mappedInput.wasSwipe();
+  if (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down) {
+    view_.railScroll(swipe == MappedInputManager::SwipeDir::Up ? 1 : -1);
+    return true;
+  }
+
+  int x = 0;
+  int y = 0;
+  if (!mappedInput.wasScreenTapped(x, y)) return true;  // swallow everything else
+
+  uint16_t turnIndex = 0;
+  switch (view_.railHitTest(x, y, turnIndex)) {
+    case TranscriptView::RailHit::Dismiss:
+      view_.closeRail();
+      requestUpdate();
+      break;
+    case TranscriptView::RailHit::Conversations:
+      view_.noteContentChangedUnderRail();  // the picker will repaint over it anyway
+      view_.closeRail();
+      openConversations();
+      break;
+    case TranscriptView::RailHit::Turn:
+      // Tell the rail the page is about to move, so closing repaints instead of
+      // restoring a snapshot of the page we are leaving.
+      view_.noteContentChangedUnderRail();
+      view_.closeRail();
+      if (view_.jumpToTurn(turnIndex)) nextIsPageTurn_ = true;
+      requestUpdate();
+      break;
+    case TranscriptView::RailHit::None:
+      break;
+  }
+  return true;
+}
+
+// The top bar is chrome, so a tap there must be claimed BEFORE the page-turn
+// zones — those are Rect{0, 0, zoneWidth, height}, full screen HEIGHT, so
+// without this the bar's outer thirds would turn pages instead.
+bool AgentVoiceActivity::handleTopBarTap() {
+  int x = 0;
+  int y = 0;
+  if (!mappedInput.wasScreenTapped(x, y)) return false;
+  if (y >= view_.topBarHitHeight()) return false;
+
+  const int third = renderer.getScreenWidth() / 3;
+  if (x < third) {
+    openConversations();
+  } else if (x < third * 2) {
+    applyConversationChoice(std::string());  // the + starts a new conversation
+  }
+  // The right third belongs to the connection indicator and does nothing.
+  return true;
+}
+
+void AgentVoiceActivity::openConversations() {
+  view_.endTurn();
+  spool_.endAgentTurn();
+  view_.clearDraft();
+
+  startActivityForResult(
+      std::make_unique<ConversationPickerActivity>(renderer, mappedInput, spool_.sessionId()),
+      [this](const ActivityResult& result) {
+        if (result.isCancelled) {
+          view_.markFullPaint();
+          requestUpdate();
+          return;
+        }
+        const auto* choice = std::get_if<FilePathResult>(&result.data);
+        applyConversationChoice(choice ? choice->path : std::string());
+      });
+}
+
+void AgentVoiceActivity::applyConversationChoice(const std::string& sessionId) {
+  // A conversation without a valid index rebuilds, and that is seconds of real
+  // work on a long one — say so rather than looking hung.
+  status_ = "Opening conversation...";
+  view_.setStatus(status_);
+  view_.markFullPaint();
+  requestUpdateAndWait();
+
+  const bool ok = sessionId.empty() ? spool_.startNewSession() : spool_.begin(sessionId.c_str());
+  if (!ok) LOG_ERR("AVA", "could not open session '%s'", sessionId.c_str());
+
+  view_.begin();
+  view_.restoreIndex();
+  view_.jumpToLatest();
+  LOG_INF("AVA", "session %s: %u turns, %u pages", spool_.sessionId().c_str(),
+          static_cast<unsigned>(spool_.turnCount()), static_cast<unsigned>(spool_.pageCount()));
+
+  status_ = "Power to talk";
+  nextIsPageTurn_ = true;
+  requestUpdate();
+}
+
+// Checked on ENTRY only, never on a timer: rotating under someone who has just
+// started speaking would lose the turn they are in the middle of, and a
+// conversation that ran long because they kept talking is not a problem.
+void AgentVoiceActivity::maybeRotateSession() {
+  const uint32_t last = spool_.lastTurnEpoch();
+  if (last == 0) return;  // no trustworthy timestamp — never guess
+  uint32_t now = 0;
+  if (!halClock.nowEpoch(now)) return;  // no clock, or the RTC lost time
+  if (now <= last || (now - last) < kIdleNewSessionSecs) return;
+
+  LOG_INF("AVA", "last turn %us ago, starting a new conversation", static_cast<unsigned>(now - last));
+  spool_.startNewSession();
+}
+
 void AgentVoiceActivity::handlePaging() {
+  if (handleRailInput()) return;
+
+  // Before anything that consumes SwipeDir::Left, since a right-edge swipe is
+  // also one of those.
+  if (mappedInput.wasRightEdgeGesture()) {
+    view_.openRail();
+    return;
+  }
+  if (handleTopBarTap()) return;
+
   if (ReaderUtils::isTouchMenuGesture(renderer, mappedInput)) {
     openTextSettings();
     return;
@@ -400,6 +533,11 @@ void AgentVoiceActivity::applyPendingTurn() {
   // mid-render, and never faster than the panel can settle.
   constexpr unsigned long kMinManualTurnGapMs = 200;
   if (RenderLock::peek() || (millis() - lastPageTurnMs_) < kMinManualTurnGapMs) return;
+
+  if (view_.railOpen()) {
+    view_.noteContentChangedUnderRail();
+    view_.closeRail();
+  }
 
   bool changed = false;
   if (pendingJumpLatest_) {
@@ -469,6 +607,51 @@ void AgentVoiceActivity::pumpInjectedTurns() {
       spool_.endAgentTurn();
       nextIsPageTurn_ = true;
       requestUpdate();
+    }
+  }
+
+  if (sessionListRequested_) {
+    sessionListRequested_ = false;
+    const auto ids = ConversationSpool::listSessionIds();
+    LOG_INF("AVA", "sessions: %u (current %s)", static_cast<unsigned>(ids.size()), spool_.sessionId().c_str());
+    for (const std::string& id : ids) {
+      ConversationSpool::Summary sum;
+      ConversationSpool::readSummary(id, sum);
+      LOG_INF("AVA", "  %s: %u turns, epoch %lu, '%s'", id.c_str(), static_cast<unsigned>(sum.turnCount),
+              static_cast<unsigned long>(sum.lastEpoch), sum.firstQuestion.c_str());
+    }
+  }
+
+  if (newConversationRequested_) {
+    newConversationRequested_ = false;
+    applyConversationChoice(std::string());
+  }
+
+  if (railToggleRequested_) {
+    railToggleRequested_ = false;
+    if (view_.railOpen()) {
+      view_.closeRail();
+      requestUpdate();
+    } else {
+      view_.openRail();
+      LOG_INF("AVA", "rail open");
+    }
+  }
+
+  const int railRow = railRowRequested_;
+  if (railRow >= 0) {
+    railRowRequested_ = -1;
+    // Resolve through the rail's own hit test so the script exercises the same
+    // path a finger does, rather than a parallel one that could drift from it.
+    uint16_t turnIndex = 0;
+    if (view_.railRowTurn(static_cast<size_t>(railRow), turnIndex)) {
+      view_.noteContentChangedUnderRail();
+      view_.closeRail();
+      LOG_INF("AVA", "rail row %d -> turn %u", railRow, static_cast<unsigned>(turnIndex));
+      if (view_.jumpToTurn(turnIndex)) nextIsPageTurn_ = true;
+      requestUpdate();
+    } else {
+      LOG_ERR("AVA", "rail row %d out of range", railRow);
     }
   }
 
@@ -580,7 +763,12 @@ void AgentVoiceActivity::loop() {
   // frame, far faster than the panel can settle, so it gets a slower coalesce
   // and is accepted as approximate until the transcript finalises.
   const unsigned long quiet = linesWaiting ? 250 : 400;
-  if ((dirty_ || linesWaiting || view_.draftNeedsRepaint()) && millis() - lastRenderMs_ > quiet) {
+  if (view_.railOpen()) {
+    // Repainting the page under the rail would both overdraw it and invalidate
+    // the snapshot that closing restores. Keep laying out; note that the page
+    // moved on so closing repaints instead.
+    if (linesWaiting || view_.draftNeedsRepaint()) view_.noteContentChangedUnderRail();
+  } else if ((dirty_ || linesWaiting || view_.draftNeedsRepaint()) && millis() - lastRenderMs_ > quiet) {
     dirty_ = false;
     lastRenderMs_ = millis();
     requestUpdate();

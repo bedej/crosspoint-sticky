@@ -43,6 +43,10 @@ class TranscriptView {
   void begin();
   bool ready() const { return fontId_ != 0 && linesPerPage_ > 0; }
   uint16_t linesPerPage() const { return linesPerPage_; }
+  // Hit band for taps on the top status bar. Deliberately taller than the bar
+  // draws: a ~28px strip is a poor finger target, and ActivityManager allows
+  // itself the same 44px for its own status-bar taps.
+  int topBarHitHeight() const { return bodyTop_ > 44 ? bodyTop_ : 44; }
 
   // Top line: the live ASR transcript. Non-negotiable for a voice UI — ASR
   // misfires, and the reader has to be able to tell a bad answer from a bad
@@ -81,6 +85,29 @@ class TranscriptView {
   void setDraft(const std::string& text);
   void clearDraft();
   bool draftNeedsRepaint() const { return draftDirty_; }
+
+  // --- query rail ----------------------------------------------------------
+  // A strip of the questions asked, overlaid on the transcript and dismissed by
+  // tapping outside it. Deliberately drawn here rather than made an Activity: an
+  // overlay has an "outside" to tap and a full-screen activity does not, which
+  // is what made the text-settings screen inescapable (HomeLab-07o).
+  enum class RailHit : uint8_t { None, Dismiss, Conversations, Turn };
+
+  void openRail();
+  void closeRail();
+  bool railOpen() const { return railOpen_; }
+  // Resolves a tap while the rail is open. `turnIndex` is set for RailHit::Turn.
+  RailHit railHitTest(int x, int y, uint16_t& turnIndex) const;
+  // Scroll the rail's window by whole rows; returns true when it moved.
+  bool railScroll(int rows);
+  // The transcript underneath changed while the rail was up, so the stored
+  // framebuffer is stale and closing must repaint rather than restore.
+  void noteContentChangedUnderRail() { railContentChanged_ = true; }
+  // Jump to the page a turn STARTS on. Returns true when the page changed.
+  bool jumpToTurn(uint16_t turnIndex);
+  // Turn behind visible rail row `row`. Lets a script drive the rail without a
+  // parallel lookup that could drift from what a tap resolves to.
+  bool railRowTurn(size_t row, uint16_t& turnIndex) const;
 
   // --- paging --------------------------------------------------------------
   // Each returns true when the displayed page changed and a repaint is owed.
@@ -149,6 +176,13 @@ class TranscriptView {
   void drawDraft();
   void eraseFrom(size_t lineIndex) const;
 
+  void buildRailRows();
+  void drawRail();
+  int railRowHeight() const;
+  int railTopY() const;
+  int railBottomY() const;
+  size_t railVisibleRows() const;
+
   void drawHeader() const;
   // Returns the width it occupied, so the status text knows where to stop.
   int drawLinkIndicator(int right, int top) const;
@@ -192,6 +226,13 @@ class TranscriptView {
   size_t livePage_ = 0;        // page the tail is currently landing on
   bool paragraphOpen_ = false;
   std::string pendingWord_;  // word fragment carried across delta boundaries
+
+  // query rail
+  bool railOpen_ = false;
+  bool railStored_ = false;          // a framebuffer snapshot is held
+  bool railContentChanged_ = false;  // the page underneath moved on
+  size_t railTop_ = 0;               // first visible row
+  std::vector<uint16_t> railRows_;   // indices into the spool's turn table
 
   // live utterance (provisional, never spooled)
   std::string draft_;

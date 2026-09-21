@@ -6,6 +6,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 
+#include <algorithm>
 #include <cstdio>
 
 namespace {
@@ -15,6 +16,36 @@ constexpr char kCurrentPath[] = "/sticky/sessions/current";
 // gets skipped rather than allowed to eat the heap.
 constexpr size_t kMaxRecordBytes = 4096;
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// session catalogue
+
+const char* ConversationSpool::sessionDir() { return kSessionDir; }
+
+std::vector<std::string> ConversationSpool::listSessionIds() {
+  std::vector<std::string> ids;
+  for (const String& name : Storage.listFiles(kSessionDir, 200)) {
+    const std::string n(name.c_str());
+    if (n.size() < 7) continue;
+    if (n.compare(n.size() - 6, 6, ".jsonl") != 0) continue;
+    ids.push_back(n.substr(0, n.size() - 6));
+  }
+  // Ids are allocated in order (s0001, s0002, ...), so lexical IS chronological
+  // — which is just as well, because HalFile exposes no modification time and
+  // SdFat only records one if a date-time callback is installed, which this
+  // firmware never does.
+  std::sort(ids.begin(), ids.end());
+  return ids;
+}
+
+bool ConversationSpool::eraseSession(const std::string& id) {
+  const std::string base = std::string(kSessionDir) + "/" + id;
+  const bool spool = Storage.remove((base + ".jsonl").c_str());
+  // The index is derived data; losing it alone would only cost a rebuild, but
+  // leaving it behind after the spool is gone would strand a stale file.
+  Storage.remove((base + ".idx").c_str());
+  return spool;
+}
 
 // ---------------------------------------------------------------------------
 // session lifecycle
@@ -547,6 +578,55 @@ size_t ConversationSpool::userTurnRefCount() const {
     if (t.role == static_cast<uint8_t>(Role::User)) n++;
   }
   return n;
+}
+
+// Reads a session's index directly, without opening its spool. Defined here so
+// the on-disk layout stays knowledge of this file alone.
+bool ConversationSpool::readSummary(const std::string& id, Summary& out) {
+  out = Summary{};
+  out.id = id;
+
+  HalFile f;
+  const std::string path = std::string(kSessionDir) + "/" + id + ".idx";
+  if (!Storage.openFileForRead("SPOOL", path, f) || !f) return false;
+
+  IndexHeader h{};
+  if (f.read(&h, sizeof(h)) != static_cast<int>(sizeof(h)) || h.magic != kIndexMagic ||
+      h.version != kIndexVersion) {
+    f.close();
+    return false;  // never indexed, or indexed by an older build
+  }
+  out.turnCount = h.turnIndex;
+
+  if (h.turnRefCount == 0 || h.turnRefCount > kMaxTurnRefs) {
+    f.close();
+    return true;  // header is usable even with no turn table
+  }
+
+  const size_t tableStart = sizeof(IndexHeader) + static_cast<size_t>(h.pageCount) * sizeof(PageRef);
+
+  // The first question. Turn 0 is normally the user's, but an agent greeting
+  // would push it along, so scan a few rather than assuming.
+  if (f.seek(tableStart)) {
+    const uint32_t probe = h.turnRefCount < 8 ? h.turnRefCount : 8;
+    for (uint32_t i = 0; i < probe; ++i) {
+      TurnRef ref;
+      if (f.read(&ref, sizeof(ref)) != static_cast<int>(sizeof(ref))) break;
+      if (ref.role == static_cast<uint8_t>(Role::User) && ref.snippet[0] != '\0') {
+        out.firstQuestion = ref.snippet;
+        break;
+      }
+    }
+  }
+
+  // And the newest timestamp, for "2 hours ago".
+  const size_t lastEntry = tableStart + static_cast<size_t>(h.turnRefCount - 1) * sizeof(TurnRef);
+  if (f.seek(lastEntry)) {
+    TurnRef ref;
+    if (f.read(&ref, sizeof(ref)) == static_cast<int>(sizeof(ref))) out.lastEpoch = ref.epoch;
+  }
+  f.close();
+  return true;
 }
 
 size_t ConversationSpool::firstPageOfTurn(const uint16_t turnIndex) const {

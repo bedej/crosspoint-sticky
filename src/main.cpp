@@ -673,6 +673,14 @@ void loop() {
         AgentVoiceActivity::requestPageMove(-1);
       } else if (cmd == "PAGETURNBACK") {
         AgentVoiceActivity::requestPageMove(-2);
+      } else if (cmd == "RAIL") {
+        AgentVoiceActivity::requestRailToggle();
+      } else if (cmd.startsWith("RAILROW ")) {
+        AgentVoiceActivity::requestRailRow(cmd.substring(8).toInt());
+      } else if (cmd == "NEWCONV") {
+        AgentVoiceActivity::requestNewConversation();
+      } else if (cmd == "CONVS") {
+        AgentVoiceActivity::requestSessionList();
       } else if (cmd == "PAGELATEST") {
         AgentVoiceActivity::requestPageMove(2);
       }

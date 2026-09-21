@@ -85,6 +85,21 @@ class ConversationSpool {
     bool operator!=(const RenderSpec& o) const { return !(*this == o); }
   };
 
+  // Enough to list a conversation without opening it. Read straight out of that
+  // session's persisted index, so the picker costs one short read per row
+  // rather than a spool scan each.
+  struct Summary {
+    std::string id;
+    uint16_t turnCount = 0;
+    uint32_t lastEpoch = 0;   // 0 when no turn carries a trustworthy timestamp
+    std::string firstQuestion;  // empty when the session has no index yet
+  };
+  // Session ids are ordinal, so a lexical sort of these is chronological.
+  static std::vector<std::string> listSessionIds();
+  static bool readSummary(const std::string& id, Summary& out);
+  static bool eraseSession(const std::string& id);
+  static const char* sessionDir();
+
   ConversationSpool() = default;
 
   // Open (creating if needed) the session spool. Passing nullptr resumes the

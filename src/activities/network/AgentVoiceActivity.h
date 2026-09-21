@@ -50,6 +50,12 @@ class AgentVoiceActivity : public Activity {
   }
   // -1 prev page, +1 next page, -2 previous turn, +2 jump to latest.
   static void requestPageMove(int8_t move) { pageRequest_ = move; }
+  // Rail and conversation hooks, for the same reason: the rail is touch-only and
+  // the picker is a list nobody can tap from a script.
+  static void requestRailToggle() { railToggleRequested_ = true; }
+  static void requestRailRow(int row) { railRowRequested_ = row; }
+  static void requestNewConversation() { newConversationRequested_ = true; }
+  static void requestSessionList() { sessionListRequested_ = true; }
   void render(RenderLock&&) override;
 
   // Keep the device awake and the loop hot while a conversation is live.
@@ -74,6 +80,10 @@ class AgentVoiceActivity : public Activity {
   static inline std::string injectAgent_;
   static inline size_t injectAgentAt_ = 0;
   static inline volatile int8_t pageRequest_ = 0;
+  static inline volatile bool railToggleRequested_ = false;
+  static inline volatile int railRowRequested_ = -1;
+  static inline volatile bool newConversationRequested_ = false;
+  static inline volatile bool sessionListRequested_ = false;
   void pumpInjectedTurns();
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
@@ -96,6 +106,15 @@ class AgentVoiceActivity : public Activity {
   // conversation feels identical to a book.
   bool handleVoiceButtons();  // returns true when the activity finished
   void openTextSettings();
+  void openConversations();
+  void applyConversationChoice(const std::string& sessionId);  // empty = start a new one
+  // Rotate to a fresh conversation when the last one went cold. Checked on
+  // entry only — see the note at the definition.
+  void maybeRotateSession();
+  // Returns true when the tap was chrome and must not also turn a page.
+  bool handleTopBarTap();
+  // Returns true when the rail consumed the input.
+  bool handleRailInput();
   void handlePaging();
   void applyPendingTurn();
   void openSpoolTurn(ConversationSpool::Role role, const char* text);
@@ -152,6 +171,9 @@ class AgentVoiceActivity : public Activity {
   // of hanging. Reset by every partial/delta so a slow streaming answer isn't cut off.
   unsigned long lastServerMs_ = 0;
   static constexpr unsigned long kStallTimeoutMs = 15000;
+  // Bede's threshold: long enough that a resumed conversation still has context
+  // he remembers, short enough that morning and evening are separate.
+  static constexpr uint32_t kIdleNewSessionSecs = 4 * 60 * 60;
 
   int16_t micBuf_[320];  // 20 ms @ 16 kHz mono
   // Mic conditioning: DC blocker state (1/2^kDcShift per sample ~= 8 Hz corner
