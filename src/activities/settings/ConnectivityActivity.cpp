@@ -1,9 +1,9 @@
 #include "ConnectivityActivity.h"
 
+#include <Arduino.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
-#include <Arduino.h>
 #include <WiFi.h>
 
 #include <cstdio>
@@ -66,8 +66,8 @@ void ConnectivityActivity::rebuildRowItems() {
     item.label = I18N.get(tab_ == Tab::Bluetooth ? BT_ROW_NAME_IDS[i] : WIFI_ROW_NAME_IDS[i]);
     item.actionValue = static_cast<int16_t>(i);
     // The first two rows of each tab report state; only the rest do anything.
-    item.enabled = tab_ == Tab::Bluetooth ? (i >= static_cast<int>(BtRow::Pair))
-                                          : (i >= static_cast<int>(WifiRow::Choose));
+    item.enabled =
+        tab_ == Tab::Bluetooth ? (i >= static_cast<int>(BtRow::Pair)) : (i >= static_cast<int>(WifiRow::Choose));
     rowItems_.push_back(item);
   }
 }
@@ -130,7 +130,10 @@ std::string ConnectivityActivity::wifiValueText(const int row) const {
 void ConnectivityActivity::openPairingWindow() {
   if (!VoiceRelayPeripheral::supported()) return;
   auto& ble = VoiceRelayPeripheral::instance();
-  const bool open = !ble.isPairingWindowOpen();
+  // Toggle what THIS screen opened, not isPairingWindowOpen(): that reports
+  // true whenever no phone is linked at all, so a first press would have
+  // "closed" a window nobody opened and left the row reading Open regardless.
+  const bool open = pairingOpenedMs_ == 0;
   ble.setPairingWindow(open);
   pairingOpenedMs_ = open ? millis() : 0;
   LOG_INF("CONN", "pairing window %s", open ? "opened" : "closed");
@@ -225,8 +228,8 @@ void ConnectivityActivity::loop() {
 
 void ConnectivityActivity::buildScreen(UiScreen& screen) {
   const int noteHeight = note_.empty() ? 0 : renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
-  screen.setContentMarginFromScreen(fui::Insets{static_cast<int16_t>(afterHeader), 0,
-                                               static_cast<int16_t>(bottomReserved + noteHeight), 0});
+  screen.setContentMarginFromScreen(
+      fui::Insets{static_cast<int16_t>(afterHeader), 0, static_cast<int16_t>(bottomReserved + noteHeight), 0});
 
   buildTabBar(screen);
 
