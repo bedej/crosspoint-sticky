@@ -193,6 +193,29 @@ Confirm against the backend rather than the device alone. `docker logs voice-app
 prints `turn complete ... samples=N` per session; a session with `samples=0` and
 `ended_explicitly=true` is something ending a turn it never fed any audio.
 
+### Two esptool writes at once can brick the device
+
+Not "one fails and the other wins" — the interrupted write reaches flash and
+truncates the app partition, and the device then boot-loops with both OTA slots
+invalid:
+
+```
+E esp_image: invalid segment length 0xffffffff
+E boot: OTA app partition slot 0 is not bootable
+E boot: No bootable app partitions in the partition table
+```
+
+So a flash that reports failure is NOT safe to read as "the device is
+unchanged". Always read the boot log afterwards rather than trusting the exit
+status: a good flash prints "Hash of data verified" AND the device comes up
+logging normally. Recovery is an ordinary reflash — the ROM bootloader is in a
+separate region and survives.
+
+This matters when two people (or two agents) share one device. "Not currently
+compiling" is not the same as "done with the toolchain", because a flash needs
+the build directory for minutes after the compiler stops, and "my flash failed"
+is not the same as "nothing happened".
+
 ### Forgetting a phone is two-sided
 
 The device can erase its own keys; it cannot erase the phone's. iOS exposes no
