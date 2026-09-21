@@ -686,6 +686,24 @@ void loop() {
         AgentVoiceActivity::requestNewConversation();
       } else if (cmd == "PICKER") {
         AgentVoiceActivity::requestPicker();
+      } else if (cmd == "CRASH") {
+        // The panic handler writes /crash_report.txt and CrashActivity shows a
+        // summary, but neither reaches serial — so a crash seen on the device
+        // could only be guessed at from outside. Dump it verbatim.
+        HalFile crashFile;
+        if (Storage.openFileForRead("MAIN", "/crash_report.txt", crashFile) && crashFile) {
+          logSerial.printf("CRASH_REPORT_START:%u\n", static_cast<unsigned>(crashFile.size()));
+          char chunk[129];
+          int got = 0;
+          while ((got = crashFile.read(chunk, sizeof(chunk) - 1)) > 0) {
+            chunk[got] = '\0';
+            logSerial.print(chunk);
+          }
+          crashFile.close();
+          logSerial.printf("\nCRASH_REPORT_END\n");
+        } else {
+          logSerial.printf("CRASH_REPORT_NONE\n");
+        }
       } else if (cmd == "CONVS") {
         AgentVoiceActivity::requestSessionList();
       } else if (cmd == "PAGELATEST") {

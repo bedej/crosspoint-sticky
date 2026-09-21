@@ -121,6 +121,13 @@ class AgentVoiceActivity : public Activity {
   // button mapping and the turn guard all come from ReaderUtils/EpubReader so a
   // conversation feels identical to a book.
   bool handleVoiceButtons();  // returns true when the activity finished
+  // Heavy work deferred OUT of activity-result callbacks. Re-flowing a
+  // conversation is seconds of SD I/O and layout, and running it inside a
+  // callback that fires while the activity stack is mid-pop panicked the device
+  // on exit from Text Settings. The callback now only records what to do.
+  enum class Pending : uint8_t { None, Reflow, Session };
+  void performPendingWork();
+
   void openTextSettings();
   void openConversations();
   void applyConversationChoice(const std::string& sessionId);  // empty = start a new one
@@ -182,6 +189,8 @@ class AgentVoiceActivity : public Activity {
   bool pendingJumpLatest_ = false;
   unsigned long lastPageTurnMs_ = 0;
   int pagesUntilFullRefresh_ = 1;  // counts down to the next HALF refresh, as the reader's does
+  Pending pending_ = Pending::None;
+  std::string pendingSessionId_;  // empty with Pending::Session means "start a new one"
   bool nextIsPageTurn_ = false;  // routes the next repaint through the reader's refresh cycle
 
   std::string status_;      // one-line status/header

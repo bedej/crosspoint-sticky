@@ -112,6 +112,11 @@ void AgentVoiceActivity::pumpBleAnswers() {
   std::string json;
   while (VoiceRelayPeripheral::instance().popAnswer(json)) {
     lastServerMs_ = millis();
+    // Logged HERE rather than in handleMessage, which both transports share and
+    // whose own line says "ws rx" whichever one delivered the frame. Without
+    // this, the log claims the socket carried every answer even when the phone
+    // did — the same lie "ws=1" told about the audio direction.
+    LOG_DBG("AVA", "ble rx %u bytes", static_cast<unsigned>(json.size()));
     handleMessage(json.c_str(), json.size());
   }
 }
@@ -125,7 +130,11 @@ void AgentVoiceActivity::pumpLink() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!wsStarted_) {
       LOG_INF("AVA", "wifi ok ip=%s rssi=%d", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
-      const std::string path = "/v1/stream?token=" + token_;
+      // client= lets the server tell a BLE turn's two sessions apart: the
+      // phone carries the audio as client=phone-relay while this socket sits
+      // idle. Without it an idle session logs as samples=0 and reads as the
+      // transport having failed.
+      const std::string path = "/v1/stream?token=" + token_ + "&client=sticky";
       LOG_INF("AVA", "ws connecting %s:%u/v1/stream", host_.c_str(), (unsigned)port_);
       ws_.begin(host_.c_str(), port_, path.c_str());
       ws_.onEvent(wsTrampoline);
@@ -435,19 +444,14 @@ void AgentVoiceActivity::openTextSettings() {
   startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
                                                                 TextSettingsActivity::Tab::Size),
                          [this](const ActivityResult&) {
-                           // A font, size or margin change is a new RenderSpec, which drops the
-                           // page index and rejects the persisted one; the spool is raw text and
-                           // is untouched. Re-laying out a long session takes real time (~9 s at
-                           // 49 turns), so say so rather than looking hung.
+                           // RECORD ONLY. This fires while the activity stack is mid-pop, and the
+                           // re-flow it used to run here — a blocking render followed by seconds
+                           // of SD I/O and layout — panicked the device on exit from Text
+                           // Settings. performPendingWork() does it from loop() instead.
                            status_ = "Re-flowing the conversation...";
-                           view_.begin();
                            view_.setStatus(status_);
-                           requestUpdateAndWait();
-
-                           view_.restoreIndex();
-                           view_.jumpToLatest();
-                           status_ = "Power to talk";
-                           nextIsPageTurn_ = true;
+                           view_.markFullPaint();
+                           pending_ = Pending::Reflow;
                            requestUpdate();
                          });
 }
@@ -549,16 +553,34 @@ void AgentVoiceActivity::openConversations() {
 }
 
 void AgentVoiceActivity::applyConversationChoice(const std::string& sessionId) {
-  // A conversation without a valid index rebuilds, and that is seconds of real
-  // work on a long one — say so rather than looking hung.
+  // Recorded rather than done: this is reached from the picker's result callback
+  // as well as from the top bar, and opening a conversation whose index is stale
+  // rebuilds it — seconds of work that must not run during activity teardown.
+  pendingSessionId_ = sessionId;
+  pending_ = Pending::Session;
   status_ = "Opening conversation...";
   view_.setStatus(status_);
   view_.markFullPaint();
-  requestUpdateAndWait();
+  requestUpdate();
+}
 
-  const bool ok = sessionId.empty() ? spool_.startNewSession() : spool_.begin(sessionId.c_str());
-  if (!ok) LOG_ERR("AVA", "could not open session '%s'", sessionId.c_str());
+// Runs from loop(), one iteration after the callback that asked for it — so the
+// "Re-flowing..." / "Opening conversation..." message is already on the panel
+// before the work starts. That is what requestUpdateAndWait() was reaching for,
+// from a place it could not safely be done.
+void AgentVoiceActivity::performPendingWork() {
+  if (pending_ == Pending::None) return;
+  const Pending work = pending_;
+  pending_ = Pending::None;
 
+  if (work == Pending::Session) {
+    const bool ok = pendingSessionId_.empty() ? spool_.startNewSession() : spool_.begin(pendingSessionId_.c_str());
+    if (!ok) LOG_ERR("AVA", "could not open session '%s'", pendingSessionId_.c_str());
+    pendingSessionId_.clear();
+  }
+
+  // A new RenderSpec drops the page index and rejects the persisted one; the
+  // spool is raw text and is untouched either way.
   view_.begin();
   view_.restoreIndex();
   view_.jumpToLatest();
@@ -569,6 +591,7 @@ void AgentVoiceActivity::applyConversationChoice(const std::string& sessionId) {
   nextIsPageTurn_ = true;
   requestUpdate();
 }
+
 
 // Checked on ENTRY only, never on a timer: rotating under someone who has just
 // started speaking would lose the turn they are in the middle of, and a
@@ -856,6 +879,7 @@ void AgentVoiceActivity::loop() {
   // and Down exits back to the menu.
   if (handleVoiceButtons()) return;  // the activity finished
 
+  performPendingWork();
   pumpInjectedTurns();
   handlePaging();
   applyPendingTurn();
