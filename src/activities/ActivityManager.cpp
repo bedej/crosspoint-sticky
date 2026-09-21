@@ -11,7 +11,7 @@
 
 #include "CrossPointSettings.h"
 #include "OpdsServerStore.h"
-#include "activities/settings/ConnectivityActivity.h"
+#include "activities/settings/VoiceMenuActivity.h"
 #include "boot_sleep/BootActivity.h"
 #include "boot_sleep/SleepActivity.h"
 #include "browser/OpdsBookBrowserActivity.h"
@@ -248,8 +248,8 @@ void ActivityManager::goToSettings() { replaceActivity(std::make_unique<Settings
 
 void ActivityManager::goToVoice() { replaceActivity(std::make_unique<AgentVoiceActivity>(renderer, mappedInput)); }
 
-void ActivityManager::goToConnectivity() {
-  replaceActivity(std::make_unique<ConnectivityActivity>(renderer, mappedInput));
+void ActivityManager::goToVoiceMenu(int tab) {
+  replaceActivity(std::make_unique<VoiceMenuActivity>(renderer, mappedInput, static_cast<VoiceMenuActivity::Tab>(tab)));
 }
 
 void ActivityManager::goToFileBrowser(std::string path) {

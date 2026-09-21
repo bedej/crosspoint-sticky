@@ -1,4 +1,4 @@
-#include "ConnectivityActivity.h"
+#include "VoiceMenuActivity.h"
 
 #include <Arduino.h>
 #include <GfxRenderer.h>
@@ -6,10 +6,17 @@
 #include <Logging.h>
 #include <WiFi.h>
 
+#include <algorithm>
 #include <cstdio>
+#include <iterator>
+#include <vector>
 
+#include "CrossPointSettings.h"
 #include "MappedInputManager.h"
+#include "ReaderFontSizes.h"
+#include "SdCardFontSystem.h"
 #include "activities/network/WifiSelectionActivity.h"
+#include "activities/settings/TextSettingsActivity.h"
 #include "ble/VoiceRelayPeripheral.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -18,7 +25,16 @@ namespace fui = freeink::ui;
 
 namespace {
 
-constexpr StrId TAB_NAME_IDS[] = {StrId::STR_BLUETOOTH, StrId::STR_WIFI};
+constexpr StrId TAB_NAME_IDS[] = {StrId::STR_TEXT, StrId::STR_BLUETOOTH, StrId::STR_WIFI};
+
+constexpr StrId TEXT_ROW_NAME_IDS[] = {StrId::STR_SIZE, StrId::STR_LINE_SPACING, StrId::STR_SCREEN_MARGIN,
+                                       StrId::STR_ALL_TEXT_SETTINGS};
+
+constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE};
+
+constexpr int MARGIN_MIN = CrossPointSettings::SCREEN_MARGIN_MIN;
+constexpr int MARGIN_MAX = CrossPointSettings::SCREEN_MARGIN_MAX;
+constexpr int MARGIN_STEP = CrossPointSettings::SCREEN_MARGIN_STEP;
 
 constexpr StrId BT_ROW_NAME_IDS[] = {StrId::STR_PHONE, StrId::STR_LINK_STATE, StrId::STR_PAIR_NEW_PHONE,
                                      StrId::STR_FORGET_PHONE};
@@ -38,12 +54,12 @@ constexpr uint32_t kPollMs = 1000;
 
 }  // namespace
 
-ConnectivityActivity::ConnectivityActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Tab initialTab)
+VoiceMenuActivity::VoiceMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Tab initialTab)
     : UiTabListActivity("Connectivity", renderer, mappedInput), tab_(initialTab) {}
 
-const char* ConnectivityActivity::tabLabel(const int index) const { return I18N.get(TAB_NAME_IDS[index]); }
+const char* VoiceMenuActivity::tabLabel(const int index) const { return I18N.get(TAB_NAME_IDS[index]); }
 
-void ConnectivityActivity::onEnter() {
+void VoiceMenuActivity::onEnter() {
   UiTabListActivity::onEnter();
 
   metrics_ = UITheme::getInstance().getMetrics();
@@ -63,7 +79,7 @@ void ConnectivityActivity::onEnter() {
   requestUpdate(true);
 }
 
-void ConnectivityActivity::onExit() {
+void VoiceMenuActivity::onExit() {
   if (startedPeripheral_) {
     VoiceRelayPeripheral::instance().end();
     startedPeripheral_ = false;
@@ -71,22 +87,42 @@ void ConnectivityActivity::onExit() {
   Activity::onExit();
 }
 
-int ConnectivityActivity::listCount() const {
-  return tab_ == Tab::Bluetooth ? static_cast<int>(BtRow::Count) : static_cast<int>(WifiRow::Count);
+int VoiceMenuActivity::listCount() const {
+  switch (tab_) {
+    case Tab::Text:
+      return static_cast<int>(TextRow::Count);
+    case Tab::Bluetooth:
+      return static_cast<int>(BtRow::Count);
+    default:
+      return static_cast<int>(WifiRow::Count);
+  }
 }
 
-void ConnectivityActivity::rebuildRowItems() {
+const StrId* VoiceMenuActivity::rowNameIds() const {
+  switch (tab_) {
+    case Tab::Text:
+      return TEXT_ROW_NAME_IDS;
+    case Tab::Bluetooth:
+      return BT_ROW_NAME_IDS;
+    default:
+      return WIFI_ROW_NAME_IDS;
+  }
+}
+
+void VoiceMenuActivity::rebuildRowItems() {
   const int count = listCount();
   rowValues_.assign(count, std::string());
   rowItems_.clear();
   rowItems_.reserve(count);
   for (int i = 0; i < count; i++) {
     fui::ListItem item;
-    item.label = I18N.get(tab_ == Tab::Bluetooth ? BT_ROW_NAME_IDS[i] : WIFI_ROW_NAME_IDS[i]);
+    item.label = I18N.get(rowNameIds()[i]);
     item.actionValue = static_cast<int16_t>(i);
     // The first two rows of each tab report state; only the rest do anything.
-    item.enabled =
-        tab_ == Tab::Bluetooth ? (i >= static_cast<int>(BtRow::Pair)) : (i >= static_cast<int>(WifiRow::Choose));
+    // Every Text row does something; the first two rows of the other tabs only
+    // report state.
+    item.enabled = tab_ == Tab::Text || (tab_ == Tab::Bluetooth ? (i >= static_cast<int>(BtRow::Pair))
+                                                                : (i >= static_cast<int>(WifiRow::Choose)));
     // Nothing to forget when no phone has ever paired, and an implicitly-open
     // pairing window is exactly that state. Offering the row invites a press
     // that cannot do anything.
@@ -97,7 +133,7 @@ void ConnectivityActivity::rebuildRowItems() {
   }
 }
 
-void ConnectivityActivity::switchTab(const int direction) {
+void VoiceMenuActivity::switchTab(const int direction) {
   const bool onTabBar = ringPos() == 0;
   constexpr int count = static_cast<int>(Tab::Count);
   tab_ = static_cast<Tab>((static_cast<int>(tab_) + direction + count) % count);
@@ -108,12 +144,86 @@ void ConnectivityActivity::switchTab(const int direction) {
   requestUpdate();
 }
 
-void ConnectivityActivity::onTabAction(const int index) {
+void VoiceMenuActivity::onTabAction(const int index) {
   if (index == static_cast<int>(tab_)) return;
   switchTab(index - static_cast<int>(tab_));
 }
 
-std::string ConnectivityActivity::btValueText(const int row) const {
+std::string VoiceMenuActivity::textValueText(const int row) const {
+  switch (static_cast<TextRow>(row)) {
+    case TextRow::Size: {
+      const std::vector<uint8_t> points = readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.sdFontFamilyName);
+      char buf[12];
+      // "pt" is the typographic unit symbol, written the same way in every
+      // language CrossPoint ships — same reasoning as the reader's size list.
+      snprintf(buf, sizeof(buf), "%u pt",
+               static_cast<unsigned>(snapToNearestPointSize(points, SETTINGS.fontPointSize)));
+      return buf;
+    }
+    case TextRow::LineSpacing: {
+      const int idx = std::clamp<int>(SETTINGS.lineSpacing, 0, static_cast<int>(std::size(LINE_SPACING_IDS)) - 1);
+      return I18N.get(LINE_SPACING_IDS[idx]);
+    }
+    case TextRow::Margin:
+      return std::to_string(static_cast<int>(SETTINGS.screenMargin));
+    default:
+      return "";
+  }
+}
+
+void VoiceMenuActivity::confirmTextRow(const int row) {
+  switch (static_cast<TextRow>(row)) {
+    case TextRow::Size: {
+      const std::vector<uint8_t> points = readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.sdFontFamilyName);
+      std::vector<std::string> options;
+      options.reserve(points.size());
+      int cur = 0;
+      const uint8_t selected = snapToNearestPointSize(points, SETTINGS.fontPointSize);
+      for (const uint8_t pt : points) {
+        if (pt == selected) cur = static_cast<int>(options.size());
+        options.push_back(std::to_string(pt) + " pt");
+      }
+      optionPopup_.show(StrId::STR_SIZE, options, cur, [points](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(points.size())) return;
+        SETTINGS.fontPointSize = points[static_cast<size_t>(idx)];
+        SETTINGS.saveToFile();
+      });
+      requestUpdate();
+      break;
+    }
+    case TextRow::LineSpacing:
+      optionPopup_.show(StrId::STR_LINE_SPACING, LINE_SPACING_IDS, static_cast<int>(std::size(LINE_SPACING_IDS)),
+                        SETTINGS.lineSpacing, [](int idx) {
+                          SETTINGS.lineSpacing = static_cast<uint8_t>(idx);
+                          SETTINGS.saveToFile();
+                        });
+      requestUpdate();
+      break;
+    case TextRow::Margin: {
+      std::vector<std::string> options;
+      options.reserve((MARGIN_MAX - MARGIN_MIN) / MARGIN_STEP + 1);
+      for (int m = MARGIN_MIN; m <= MARGIN_MAX; m += MARGIN_STEP) options.push_back(std::to_string(m));
+      const int cur = (std::clamp<int>(SETTINGS.screenMargin, MARGIN_MIN, MARGIN_MAX) - MARGIN_MIN) / MARGIN_STEP;
+      optionPopup_.show(StrId::STR_SCREEN_MARGIN, options, cur, [](int idx) {
+        SETTINGS.screenMargin = static_cast<uint8_t>(MARGIN_MIN + idx * MARGIN_STEP);
+        SETTINGS.saveToFile();
+      });
+      requestUpdate();
+      break;
+    }
+    case TextRow::AllSettings:
+      // Font family, alignment, hyphenation and the rest: the reader's own
+      // screen rather than a second copy of it here.
+      startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
+                                                                    TextSettingsActivity::Tab::Family),
+                             [this](const ActivityResult&) { requestUpdate(true); });
+      break;
+    default:
+      break;
+  }
+}
+
+std::string VoiceMenuActivity::btValueText(const int row) const {
   if (!VoiceRelayPeripheral::supported()) return tr(STR_BT_UNAVAILABLE);
   const auto& ble = VoiceRelayPeripheral::instance();
   switch (static_cast<BtRow>(row)) {
@@ -130,7 +240,12 @@ std::string ConnectivityActivity::btValueText(const int row) const {
     case BtRow::Pair:
       // Imperative, not a state word: every other row's value answers "what is
       // this", and "Closed" answers a question this row does not ask.
-      return ble.isPairingWindowOpen() ? tr(STR_PAIRING_OPEN) : tr(STR_PAIR_TAP_TO_OPEN);
+      // Three states, not two: a window this screen opened, a device that has
+      // never paired and is therefore open to its first phone anyway, and the
+      // ordinary closed case. Values stay short — a sentence here wraps the
+      // label onto two lines.
+      if (pairingOpenedMs_ != 0) return tr(STR_PAIRING_OPEN);
+      return ble.isPairingWindowOpen() ? tr(STR_PAIRING_READY) : tr(STR_PAIR_TAP_TO_OPEN);
     case BtRow::Forget:
       // Deliberately blank. bondCount() reaches into the NimBLE host, and this
       // runs on the render path with the link live.
@@ -140,7 +255,18 @@ std::string ConnectivityActivity::btValueText(const int row) const {
   }
 }
 
-std::string ConnectivityActivity::wifiValueText(const int row) const {
+std::string VoiceMenuActivity::valueTextFor(const int row) const {
+  switch (tab_) {
+    case Tab::Text:
+      return textValueText(row);
+    case Tab::Bluetooth:
+      return btValueText(row);
+    default:
+      return wifiValueText(row);
+  }
+}
+
+std::string VoiceMenuActivity::wifiValueText(const int row) const {
   const bool up = WiFi.status() == WL_CONNECTED;
   switch (static_cast<WifiRow>(row)) {
     case WifiRow::Network:
@@ -156,7 +282,7 @@ std::string ConnectivityActivity::wifiValueText(const int row) const {
   }
 }
 
-void ConnectivityActivity::openPairingWindow() {
+void VoiceMenuActivity::openPairingWindow() {
   if (!VoiceRelayPeripheral::supported()) return;
   auto& ble = VoiceRelayPeripheral::instance();
   // Toggle what THIS screen opened, not isPairingWindowOpen(): that reports
@@ -169,7 +295,7 @@ void ConnectivityActivity::openPairingWindow() {
   requestUpdate();
 }
 
-void ConnectivityActivity::forgetPhone() {
+void VoiceMenuActivity::forgetPhone() {
   if (!VoiceRelayPeripheral::supported()) return;
   VoiceRelayPeripheral::instance().forgetBonds();
   // Say so explicitly: forgetting a phone that is not in the room changes
@@ -183,7 +309,11 @@ void ConnectivityActivity::forgetPhone() {
   requestUpdate();
 }
 
-void ConnectivityActivity::activateIndex(const int index) {
+void VoiceMenuActivity::activateIndex(const int index) {
+  if (tab_ == Tab::Text) {
+    confirmTextRow(index);
+    return;
+  }
   if (tab_ == Tab::Bluetooth) {
     switch (static_cast<BtRow>(index)) {
       case BtRow::Pair:
@@ -212,7 +342,10 @@ void ConnectivityActivity::activateIndex(const int index) {
   }
 }
 
-bool ConnectivityActivity::handleButtons() {
+bool VoiceMenuActivity::handleCustomInput() { return optionPopup_.isActive(); }
+
+bool VoiceMenuActivity::handleButtons() {
+  if (optionPopup_.isActive()) return false;  // the popup owns input while it is up
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
     finish();
     return true;
@@ -228,7 +361,7 @@ bool ConnectivityActivity::handleButtons() {
   return false;
 }
 
-void ConnectivityActivity::loop() {
+void VoiceMenuActivity::loop() {
   UiListActivity::loop();
 
   const uint32_t now = millis();
@@ -251,7 +384,7 @@ void ConnectivityActivity::loop() {
   // Both halves of this screen change underneath it: a phone links or drops,
   // Wi-Fi finishes associating. Repaint only when a value actually differs.
   for (int i = 0; i < listCount(); i++) {
-    const std::string next = tab_ == Tab::Bluetooth ? btValueText(i) : wifiValueText(i);
+    const std::string next = valueTextFor(i);
     if (next != rowValues_[i]) {
       requestUpdate();
       return;
@@ -259,7 +392,7 @@ void ConnectivityActivity::loop() {
   }
 }
 
-void ConnectivityActivity::buildScreen(UiScreen& screen) {
+void VoiceMenuActivity::buildScreen(UiScreen& screen) {
   const int noteHeight = note_.empty() ? 0 : renderer.getTextHeight(UI_10_FONT_ID) + metrics_.verticalSpacing;
   screen.setContentMarginFromScreen(
       fui::Insets{static_cast<int16_t>(afterHeader), 0, static_cast<int16_t>(bottomReserved + noteHeight), 0});
@@ -268,7 +401,7 @@ void ConnectivityActivity::buildScreen(UiScreen& screen) {
 
   const int count = listCount();
   for (int i = 0; i < count; i++) {
-    rowValues_[i] = tab_ == Tab::Bluetooth ? btValueText(i) : wifiValueText(i);
+    rowValues_[i] = valueTextFor(i);
     rowItems_[i].value = rowValues_[i].empty() ? nullptr : rowValues_[i].c_str();
   }
 
@@ -284,11 +417,13 @@ void ConnectivityActivity::buildScreen(UiScreen& screen) {
   screen.list(props);
 }
 
-void ConnectivityActivity::render(RenderLock&&) {
+void VoiceMenuActivity::render(RenderLock&&) {
+  if (optionPopup_.processRender(renderer, mappedInput)) return;  // picker draws over everything
+
   renderer.clearScreen();
 
   GUI.drawHeader(renderer, Rect{0, metrics_.topPadding, renderer.getScreenWidth(), metrics_.headerHeight},
-                 tr(STR_CONNECTIVITY));
+                 tr(STR_VOICE_MENU));
 
   renderUi();
 

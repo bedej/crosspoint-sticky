@@ -659,7 +659,9 @@ void loop() {
       } else if (cmd == "VOICE") {
         activityManager.goToVoice();
       } else if (cmd == "CONN") {
-        activityManager.goToConnectivity();
+        activityManager.goToVoiceMenu();
+      } else if (cmd.startsWith("CONN ")) {
+        activityManager.goToVoiceMenu(cmd.substring(5).toInt());
       } else if (cmd == "PTT") {
         AgentVoiceActivity::requestPushToTalk();
       } else if (cmd.startsWith("ASK ")) {
