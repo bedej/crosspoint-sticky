@@ -34,6 +34,18 @@ class HalClock {
   // Returns false if RTC is not available.
   bool formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased = 48, bool use12Hour = false) const;
 
+  // Current time as UTC seconds since the epoch.
+  //
+  // Returns false whenever the value would be a guess rather than a reading: no
+  // RTC on this board, an I2C error, the oscillator's low-voltage flag set (the
+  // chip telling us it lost time), or a year that predates any plausible sync.
+  // Callers must treat false as "elapsed time is unknowable" and degrade, not
+  // substitute millis() — that resets on every deep-sleep wake.
+  //
+  // Deliberately uncached, unlike getTime(): this is read about once per
+  // conversation turn, not once per frame.
+  bool nowEpoch(uint32_t& out) const;
+
   // Sync the RTC from an NTP server. Requires WiFi to be connected.
   // Blocks for up to ~5s while waiting for SNTP response.
   // Returns true if the RTC was successfully updated.

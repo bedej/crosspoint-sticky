@@ -187,6 +187,7 @@ class TranscriptView {
   uint32_t liveTurnOffset_ = 0;
   uint16_t liveTurnIndex_ = 0;
   uint16_t liveTurnLine_ = 0;  // lines emitted so far for the open turn
+  bool liveTurnRefd_ = false;  // this turn is already in the spool's turn table
   uint32_t docLine_ = 0;       // settled lines in the whole flowed document
   size_t livePage_ = 0;        // page the tail is currently landing on
   bool paragraphOpen_ = false;

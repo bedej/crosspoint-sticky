@@ -43,8 +43,25 @@ class ConversationSpool {
     uint16_t index = 0;       // 0-based turn ordinal within the session
     uint32_t offset = 0;      // byte offset of the turn's START record
     uint32_t nextOffset = 0;  // byte offset of the next turn's start (== size() at the end)
+    uint32_t epoch = 0;       // UTC seconds when the turn opened; 0 = unknown
     std::string text;
   };
+
+  // One row for the query rail and the conversation picker: enough to list and
+  // jump to a turn without reading the spool back.
+  //
+  // Held in RAM alongside the page index rather than windowed off the card. A
+  // conversation is bounded now that an idle one rotates after a few hours, so
+  // this stays small in practice; kMaxTurnRefs is the backstop for a session
+  // that somehow does not.
+  struct TurnRef {
+    uint32_t offset = 0;  // START record of the turn
+    uint32_t epoch = 0;   // 0 when the clock could not be trusted
+    uint16_t turnIndex = 0;
+    uint8_t role = 0;
+    char snippet[21] = {0};  // first words, NUL-terminated
+  };
+  static constexpr size_t kMaxTurnRefs = 2000;
 
   // Where a page begins. 8 bytes; 1000 pages = 8 KB.
   struct PageRef {
@@ -102,18 +119,31 @@ class ConversationSpool {
   // where "jump to latest" starts laying out.
   uint32_t lastTurnOffset() const { return lastTurnOffset_; }
   uint16_t lastTurnIndex() const { return turnCount_ ? static_cast<uint16_t>(turnCount_ - 1) : 0; }
+  // UTC seconds of the most recent turn, or 0 when no turn carries a trustworthy
+  // timestamp. Callers must treat 0 as "unknowable" rather than as long ago.
+  uint32_t lastTurnEpoch() const { return lastTurnEpoch_; }
 
   // --- page index ----------------------------------------------------------
   const RenderSpec& spec() const { return spec_; }
   // Drops the index when the geometry changed. Returns true if it was dropped.
   bool applySpec(const RenderSpec& spec);
-  void clearIndex() { pages_.clear(); }
+  void clearIndex() {
+    pages_.clear();
+    turns_.clear();
+  }
   void appendPage(const PageRef& ref) { pages_.push_back(ref); }
   size_t pageCount() const { return pages_.size(); }
   const PageRef& page(size_t i) const { return pages_[i]; }
   bool hasPages() const { return !pages_.empty(); }
   // Index of the first page that opens on or after `turnIndex`, or pageCount().
   size_t firstPageOfTurn(uint16_t turnIndex) const;
+
+  // --- turn table ----------------------------------------------------------
+  void appendTurnRef(const Turn& turn);
+  size_t turnRefCount() const { return turns_.size(); }
+  const TurnRef& turnRef(size_t i) const { return turns_[i]; }
+  // Rows the query rail shows: user turns are the questions asked.
+  size_t userTurnRefCount() const;
 
   // Where a saved index stops. It always sits on a TURN BOUNDARY, so resuming
   // needs no mid-turn layout state.
@@ -138,7 +168,8 @@ class ConversationSpool {
   // Read one raw line starting at `offset`. Returns the offset just past its
   // newline, or 0 on EOF/error.
   uint32_t readLine(uint32_t offset, std::string& line) const;
-  static bool parseRecord(const std::string& line, Role& role, bool& continuation, std::string& text);
+  static bool parseRecord(const std::string& line, Role& role, bool& continuation, uint32_t& epoch,
+                          std::string& text);
 
   std::string path_;
   std::string sessionId_;
@@ -147,7 +178,9 @@ class ConversationSpool {
   uint32_t size_ = 0;
   uint16_t turnCount_ = 0;
   uint32_t lastTurnOffset_ = 0;
+  uint32_t lastTurnEpoch_ = 0;
 
   RenderSpec spec_;
   std::vector<PageRef> pages_;
+  std::vector<TurnRef> turns_;
 };

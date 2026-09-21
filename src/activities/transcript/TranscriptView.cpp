@@ -120,6 +120,7 @@ void TranscriptView::beginTurn(const Role role, const uint32_t turnOffset, const
   liveTurnOffset_ = turnOffset;
   liveTurnIndex_ = turnIndex;
   liveTurnLine_ = 0;
+  liveTurnRefd_ = false;
   startParagraph();
   // Turn separator: a full line-height gap, the same break the reader gets from
   // BlockStyle::fromBrElement. It is line 0 of the turn so that a replay from
@@ -209,6 +210,17 @@ void TranscriptView::flushTail() {
 
 void TranscriptView::endTurn() {
   flushTail();
+  // Record the turn for the query rail now rather than at beginTurn(): the
+  // snippet needs the whole text, which only exists once the turn has settled.
+  // Guarded because endTurn() is idempotent by design — finishAnswer(), onExit()
+  // and the next beginTurn() may all call it for the same turn.
+  if (!liveTurnRefd_ && spool_.isOpen() && spool_.turnCount() > 0) {
+    ConversationSpool::Turn turn;
+    if (spool_.readTurnAt(liveTurnOffset_, liveTurnIndex_, turn)) {
+      spool_.appendTurnRef(turn);
+      liveTurnRefd_ = true;
+    }
+  }
   // A completed turn is a clean boundary, and this is what spares the next boot
   // a full re-layout of the conversation.
   saveIndex();
@@ -316,6 +328,7 @@ void TranscriptView::rebuildIndexFrom(const uint32_t offset, const uint16_t turn
     liveTurnOffset_ = turn.offset;
     liveTurnIndex_ = index;
     liveTurnLine_ = 0;
+    spool_.appendTurnRef(turn);
     layoutTurnText(turn.role, index, turn.text, [this](Line line, uint16_t) { emitLine(std::move(line)); });
     if (turn.nextOffset <= cursor) break;
     cursor = turn.nextOffset;

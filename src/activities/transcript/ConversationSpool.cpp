@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
 
@@ -24,7 +25,9 @@ bool ConversationSpool::begin(const char* sessionId) {
   size_ = 0;
   turnCount_ = 0;
   lastTurnOffset_ = 0;
+  lastTurnEpoch_ = 0;
   pages_.clear();
+  turns_.clear();
 
   Storage.ensureDirectoryExists(kSessionDir);
 
@@ -86,7 +89,9 @@ bool ConversationSpool::startNewSession() {
   size_ = 0;
   turnCount_ = 0;
   lastTurnOffset_ = 0;
+  lastTurnEpoch_ = 0;
   pages_.clear();
+  turns_.clear();
   LOG_INF("SPOOL", "new session %s", sessionId_.c_str());
   return true;
 }
@@ -135,12 +140,23 @@ bool ConversationSpool::appendRecord(const Role role, const bool continuation, c
   line += "{\"r\":\"";
   line += (role == Role::User) ? 'u' : 'a';
   line += "\",";
+  uint32_t epoch = 0;
   if (continuation) {
     line += "\"c\":1,";
   } else {
-    char ts[32];
-    snprintf(ts, sizeof(ts), "\"t\":%lu,", static_cast<unsigned long>(millis()));
-    line += ts;
+    // Only a turn's START record is timestamped, so this is one I2C read per
+    // turn rather than per streamed delta.
+    //
+    // millis() used to go here, which was worse than useless: it resets on every
+    // deep-sleep wake, so a resumed session's timestamps ran BACKWARDS partway
+    // through its own file. When the clock cannot be trusted the field is now
+    // omitted entirely — an absent timestamp reads as "unknown", where a wrong
+    // one silently answers "how long since we last spoke?".
+    if (halClock.nowEpoch(epoch)) {
+      char ts[32];
+      snprintf(ts, sizeof(ts), "\"t\":%lu,", static_cast<unsigned long>(epoch));
+      line += ts;
+    }
   }
   line += "\"x\":\"";
   appendJsonEscaped(line, text);
@@ -164,6 +180,7 @@ bool ConversationSpool::appendRecord(const Role role, const bool continuation, c
 
   if (!continuation) {
     lastTurnOffset_ = size_;
+    if (epoch != 0) lastTurnEpoch_ = epoch;
     if (turnCount_ < 0xFFFF) turnCount_++;
   }
   size_ += static_cast<uint32_t>(line.size());
@@ -211,7 +228,8 @@ uint32_t ConversationSpool::readLine(const uint32_t offset, std::string& line) c
   return line.empty() ? 0 : pos;
 }
 
-bool ConversationSpool::parseRecord(const std::string& line, Role& role, bool& continuation, std::string& text) {
+bool ConversationSpool::parseRecord(const std::string& line, Role& role, bool& continuation, uint32_t& epoch,
+                                    std::string& text) {
   if (line.empty() || line[0] != '{') return false;
   JsonDocument doc;
   if (deserializeJson(doc, line.c_str(), line.size())) return false;
@@ -219,6 +237,13 @@ bool ConversationSpool::parseRecord(const std::string& line, Role& role, bool& c
   role = (r[0] == 'u') ? Role::User : Role::Agent;
   continuation = (doc["c"] | 0) != 0;
   text = static_cast<const char*>(doc["x"] | "");
+
+  // Spools written before timestamps were real carry millis()-since-boot here.
+  // Anything below this is not a plausible epoch, and treating it as one would
+  // date the turn to 1970 and make every old conversation look infinitely stale.
+  constexpr uint32_t kMinPlausibleEpoch = 1000000000u;  // 2001-09-09
+  const uint32_t t = doc["t"] | 0u;
+  epoch = (t >= kMinPlausibleEpoch) ? t : 0u;
   return true;
 }
 
@@ -235,10 +260,12 @@ bool ConversationSpool::readTurnAt(const uint32_t offset, const uint16_t index, 
 
   Role role = Role::Agent;
   bool continuation = false;
+  uint32_t epoch = 0;
   std::string text;
-  if (!parseRecord(line, role, continuation, text)) return false;
+  if (!parseRecord(line, role, continuation, epoch, text)) return false;
   out.role = role;
   out.text = text;
+  out.epoch = epoch;
   out.nextOffset = pos;
 
   // An agent turn continues across every following {"c":1} record.
@@ -248,8 +275,9 @@ bool ConversationSpool::readTurnAt(const uint32_t offset, const uint16_t index, 
       if (next == 0) break;
       Role r2 = Role::Agent;
       bool cont2 = false;
+      uint32_t e2 = 0;
       std::string t2;
-      if (!parseRecord(line, r2, cont2, t2)) break;
+      if (!parseRecord(line, r2, cont2, e2, t2)) break;
       if (r2 != Role::Agent || !cont2) break;  // a new turn starts here
       out.text += t2;
       pos = next;
@@ -262,6 +290,7 @@ bool ConversationSpool::readTurnAt(const uint32_t offset, const uint16_t index, 
 bool ConversationSpool::scan() {
   turnCount_ = 0;
   lastTurnOffset_ = 0;
+  lastTurnEpoch_ = 0;
   size_ = 0;
   agentTurnOpen_ = false;
 
@@ -283,10 +312,12 @@ bool ConversationSpool::scan() {
     }
     Role role = Role::Agent;
     bool continuation = false;
+    uint32_t epoch = 0;
     std::string text;
-    if (parseRecord(line, role, continuation, text)) {
+    if (parseRecord(line, role, continuation, epoch, text)) {
       if (!continuation) {
         lastTurnOffset_ = lineStart;
+        if (epoch != 0) lastTurnEpoch_ = epoch;
         if (turnCount_ < 0xFFFF) turnCount_++;
       }
       sawAgentTail = (role == Role::Agent);
@@ -323,7 +354,7 @@ namespace {
 // Bumped whenever the on-disk layout below changes, so a stale file is
 // rejected rather than misread.
 constexpr uint32_t kIndexMagic = 0x58444953;  // "SIDX"
-constexpr uint8_t kIndexVersion = 1;
+constexpr uint8_t kIndexVersion = 2;  // v2 adds the turn table
 
 struct IndexHeader {
   uint32_t magic;
@@ -340,6 +371,7 @@ struct IndexHeader {
   uint16_t turnIndex;
   uint16_t pad3;
   uint32_t pageCount;
+  uint32_t turnRefCount;  // v2
 };
 }  // namespace
 
@@ -361,6 +393,7 @@ bool ConversationSpool::saveIndex(const IndexCursor& cursor) const {
   h.docLine = cursor.docLine;
   h.turnIndex = cursor.turnIndex;
   h.pageCount = static_cast<uint32_t>(pages_.size());
+  h.turnRefCount = static_cast<uint32_t>(turns_.size());
 
   const std::string path = indexPath();
   HalFile f = Storage.open(path.c_str(), O_WRITE | O_CREAT | O_TRUNC);
@@ -372,6 +405,10 @@ bool ConversationSpool::saveIndex(const IndexCursor& cursor) const {
   if (ok && !pages_.empty()) {
     const size_t bytes = pages_.size() * sizeof(PageRef);
     ok = f.write(reinterpret_cast<const uint8_t*>(pages_.data()), bytes) == bytes;
+  }
+  if (ok && !turns_.empty()) {
+    const size_t bytes = turns_.size() * sizeof(TurnRef);
+    ok = f.write(reinterpret_cast<const uint8_t*>(turns_.data()), bytes) == bytes;
   }
   f.flush();
   f.close();
@@ -404,6 +441,7 @@ bool ConversationSpool::loadIndex(IndexCursor& cursor) {
   }
 
   pages_.clear();
+  turns_.clear();
   if (h.pageCount > 0) {
     if (h.pageCount > 65535) {  // refuse an absurd count rather than allocate on it
       f.close();
@@ -417,14 +455,98 @@ bool ConversationSpool::loadIndex(IndexCursor& cursor) {
       return false;
     }
   }
+  if (h.turnRefCount > 0) {
+    if (h.turnRefCount > kMaxTurnRefs) {
+      pages_.clear();
+      f.close();
+      return false;
+    }
+    turns_.resize(h.turnRefCount);
+    const size_t bytes = turns_.size() * sizeof(TurnRef);
+    if (f.read(turns_.data(), bytes) != static_cast<int>(bytes)) {
+      // The page index alone is still usable; only the rail loses its rows. But
+      // a truncated file means something is wrong, so rebuild rather than guess.
+      pages_.clear();
+      turns_.clear();
+      f.close();
+      return false;
+    }
+  }
   f.close();
 
   cursor.spoolOffset = h.spoolOffset;
   cursor.turnIndex = h.turnIndex;
   cursor.docLine = h.docLine;
-  LOG_INF("SPOOL", "index loaded: %u pages, resume at %u/%u", static_cast<unsigned>(pages_.size()),
-          static_cast<unsigned>(cursor.spoolOffset), static_cast<unsigned>(size_));
+  LOG_INF("SPOOL", "index loaded: %u pages, %u turns, resume at %u/%u", static_cast<unsigned>(pages_.size()),
+          static_cast<unsigned>(turns_.size()), static_cast<unsigned>(cursor.spoolOffset),
+          static_cast<unsigned>(size_));
   return true;
+}
+
+void ConversationSpool::appendTurnRef(const Turn& turn) {
+  if (turns_.size() >= kMaxTurnRefs) return;  // backstop; paging is unaffected
+  TurnRef ref;
+  ref.offset = turn.offset;
+  ref.epoch = turn.epoch;
+  ref.turnIndex = turn.index;
+  ref.role = static_cast<uint8_t>(turn.role);
+
+  // First words of the turn, collapsed to single spaces and cut on a word
+  // boundary where one is available, so a rail row does not end mid-word.
+  const size_t cap = sizeof(ref.snippet) - 1;
+  size_t n = 0;
+  bool pendingSpace = false;
+  for (const char c : turn.text) {
+    if (c == ' ' || c == '\n' || c == '\t' || c == '\r') {
+      if (n > 0) pendingSpace = true;
+      continue;
+    }
+    if (pendingSpace) {
+      if (n >= cap) break;
+      ref.snippet[n++] = ' ';
+      pendingSpace = false;
+    }
+    if (n >= cap) break;
+    ref.snippet[n++] = c;
+  }
+  if (n == cap) {
+    // Cut on the last word boundary so a row does not end mid-word.
+    for (size_t i = n; i-- > 0;) {
+      if (ref.snippet[i] == ' ') {
+        n = i;
+        break;
+      }
+    }
+  }
+
+  // The cut above is by BYTE, and this firmware renders 34 languages — so walk
+  // back to the start of the final codepoint and drop it if the cut landed
+  // inside it. A half-written UTF-8 sequence renders as a missing glyph.
+  size_t lead = n;
+  while (lead > 0 && (static_cast<unsigned char>(ref.snippet[lead - 1]) & 0xC0) == 0x80) lead--;
+  if (lead > 0) {
+    const unsigned char c = static_cast<unsigned char>(ref.snippet[lead - 1]);
+    size_t needed = 1;
+    if ((c & 0xE0) == 0xC0) {
+      needed = 2;
+    } else if ((c & 0xF0) == 0xE0) {
+      needed = 3;
+    } else if ((c & 0xF8) == 0xF0) {
+      needed = 4;
+    }
+    if (lead - 1 + needed > n) n = lead - 1;
+  }
+
+  ref.snippet[n] = '\0';
+  turns_.push_back(ref);
+}
+
+size_t ConversationSpool::userTurnRefCount() const {
+  size_t n = 0;
+  for (const TurnRef& t : turns_) {
+    if (t.role == static_cast<uint8_t>(Role::User)) n++;
+  }
+  return n;
 }
 
 size_t ConversationSpool::firstPageOfTurn(const uint16_t turnIndex) const {

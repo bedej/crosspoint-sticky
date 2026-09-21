@@ -276,6 +276,8 @@ bool MappedInputManager::wasBackGesture() const {
   return wasEdgeSwipe(fui::ScreenEdge::Left);
 }
 
+bool MappedInputManager::wasRightEdgeGesture() const { return wasEdgeSwipe(fui::ScreenEdge::Right); }
+
 bool MappedInputManager::wasTopEdgeDownSwipe() const { return wasEdgeSwipe(fui::ScreenEdge::Top); }
 
 bool MappedInputManager::wasBottomEdgeUpSwipe() const { return wasEdgeSwipe(fui::ScreenEdge::Bottom); }

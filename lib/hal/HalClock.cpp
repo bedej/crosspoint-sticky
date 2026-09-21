@@ -39,6 +39,39 @@ bool HalClock::getTime(uint8_t& hour, uint8_t& minute) const {
   return true;
 }
 
+namespace {
+// Days from 1970-01-01 to y-m-d, proleptic Gregorian. Howard Hinnant's
+// days_from_civil: exact in integer arithmetic, no <ctime> and no 32-bit
+// mktime/timezone entanglement. The RTC holds UTC (syncFromNTP writes gmtime_r
+// output and configTzTime uses "UTC0"), so there is no offset to apply here —
+// SETTINGS.clockUtcOffsetQ is a display concern and belongs at format time.
+int32_t daysFromCivil(int32_t y, uint32_t m, uint32_t d) {
+  y -= m <= 2;
+  const int32_t era = (y >= 0 ? y : y - 399) / 400;
+  const uint32_t yoe = static_cast<uint32_t>(y - era * 400);
+  const uint32_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  const uint32_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + static_cast<int32_t>(doe) - 719468;
+}
+// An RTC that has never been set reports 2000-01-01. now() already rejects the
+// low-voltage case, but a plausible-year check also catches a clock that was set
+// to nonsense.
+constexpr uint16_t MIN_PLAUSIBLE_YEAR = 2020;
+}  // namespace
+
+bool HalClock::nowEpoch(uint32_t& out) const {
+  if (!_available) return false;
+  Rtc::DateTime dt;
+  if (!_sdkRtc.now(dt)) return false;  // I2C error, or the oscillator stopped
+  if (dt.year < MIN_PLAUSIBLE_YEAR) return false;
+
+  const int32_t days = daysFromCivil(dt.year, dt.month, dt.day);
+  if (days < 0) return false;
+  out = static_cast<uint32_t>(days) * 86400u + static_cast<uint32_t>(dt.hour) * 3600u +
+        static_cast<uint32_t>(dt.minute) * 60u + dt.second;
+  return true;
+}
+
 bool HalClock::formatTime(char* buf, size_t bufSize, uint8_t utcOffsetQuarterHoursBiased, bool use12Hour) const {
   if (bufSize < (use12Hour ? 9u : 6u)) return false;
   uint8_t h, m;
