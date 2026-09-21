@@ -216,6 +216,27 @@ compiling" is not the same as "done with the toolchain", because a flash needs
 the build directory for minutes after the compiler stops, and "my flash failed"
 is not the same as "nothing happened".
 
+### Don't request security on top of the phone's own pairing
+
+The device asking for encryption the moment an unknown central connects
+COLLIDES with the pairing iOS starts by itself, because the phone's read of
+audio-up has already returned insufficient authentication and set a procedure
+running. The collision shows up as:
+
+```
+[BLE] requested encryption (ok=1 rc=2)     <- BLE_HS_EALREADY
+[BLE] audio-up subscribed (secure=0)
+[BLE] audio-up unsubscribed (secure=0)
+[BLE] central disconnected (reason=534), advertising again
+```
+
+— connect, subscribe, unsubscribe, disconnect, repeat, and pairing never
+completes. `ok=1` is not success here; read `rc`.
+
+Ask for security only from a phone that is ALREADY bonded, where the point is
+re-establishing encryption from stored keys. For a new phone, let its own
+attempt run: pairing then completes in about six seconds with no churn.
+
 ### Forgetting a phone is two-sided
 
 The device can erase its own keys; it cannot erase the phone's. iOS exposes no

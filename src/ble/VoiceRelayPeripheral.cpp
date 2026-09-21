@@ -129,10 +129,16 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     // a central that is merely refused learns nothing and never pairs, so the
     // link would fail closed and stay that way. This starts pairing for a new
     // phone and re-establishes encryption from stored keys for a known one.
-    if (!info.isEncrypted()) {
+    // Only ask a phone we already know to re-establish encryption. For a NEW
+    // phone, iOS starts pairing itself the moment it reads audio-up and gets
+    // insufficient authentication back, and requesting security on top of that
+    // collides with the procedure already running (rc=2, BLE_HS_EALREADY) —
+    // after which the link churns through connect, subscribe and disconnect
+    // without ever completing. The phone's own attempt is the reliable one.
+    if (info.isBonded() && !info.isEncrypted()) {
       int rc = 0;
       const bool ok = NimBLEDevice::startSecurity(info.getConnHandle(), &rc);
-      LOG_INF("BLE", "requested encryption (ok=%d rc=%d)", (int)ok, rc);
+      LOG_INF("BLE", "asked a known phone to re-encrypt (ok=%d rc=%d)", (int)ok, rc);
     }
     // Keep advertising off while connected: one phone at a time, and a second
     // central subscribing to audio-up would fork the stream.
