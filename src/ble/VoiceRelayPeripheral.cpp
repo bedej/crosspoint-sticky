@@ -1,7 +1,5 @@
 #include "VoiceRelayPeripheral.h"
 
-#include <BoardConfig.h>  // FREEINK_CAP_BLE_VOICE_RELAY
-
 VoiceRelayPeripheral& VoiceRelayPeripheral::instance() {
   static VoiceRelayPeripheral inst;
   return inst;
@@ -35,12 +33,12 @@ struct State {
   NimBLECharacteristic* control = nullptr;
   NimBLECharacteristic* answerDown = nullptr;
 
-  std::mutex mtx;                 // guards everything below (NimBLE host task vs app)
+  std::mutex mtx;  // guards everything below (NimBLE host task vs app)
   bool connected = false;
   bool streaming = false;
   uint16_t seq = 0;
-  std::string answerPartial;      // fragments accumulating
-  std::string answerReady;        // one complete object, waiting for the app
+  std::string answerPartial;  // fragments accumulating
+  std::string answerReady;    // one complete object, waiting for the app
   std::string linkState = "—";
 };
 
@@ -79,9 +77,7 @@ class ServerCallbacks : public NimBLEServerCallbacks {
     NimBLEDevice::startAdvertising();
   }
 
-  void onMTUChange(uint16_t mtu, NimBLEConnInfo&) override {
-    LOG_INF("BLE", "MTU now %u", (unsigned)mtu);
-  }
+  void onMTUChange(uint16_t mtu, NimBLEConnInfo&) override { LOG_INF("BLE", "MTU now %u", (unsigned)mtu); }
 };
 
 class AudioUpCallbacks : public NimBLECharacteristicCallbacks {
@@ -156,12 +152,11 @@ bool VoiceRelayPeripheral::begin(const char* deviceName) {
   NimBLEService* svc = s.server->createService(kServiceUuid);
   s.audioUp = svc->createCharacteristic(kAudioUpUuid, NIMBLE_PROPERTY::NOTIFY);
   s.audioUp->setCallbacks(new AudioUpCallbacks());
-  s.control = svc->createCharacteristic(
-      kControlUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
+  s.control = svc->createCharacteristic(kControlUuid,
+                                        NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR | NIMBLE_PROPERTY::NOTIFY);
   s.control->setCallbacks(new InboundCallbacks());
   // The phone is the central, so device-bound messages are WRITES, not notifies.
-  s.answerDown = svc->createCharacteristic(
-      kAnswerDownUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
+  s.answerDown = svc->createCharacteristic(kAnswerDownUuid, NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR);
   s.answerDown->setCallbacks(new InboundCallbacks());
   svc->start();
 
@@ -207,9 +202,7 @@ void VoiceRelayPeripheral::notifyTurnStart() {
   notifyControlJson(R"({"type":"turn","action":"start"})");
 }
 
-void VoiceRelayPeripheral::notifyTurnStop() {
-  notifyControlJson(R"({"type":"turn","action":"stop"})");
-}
+void VoiceRelayPeripheral::notifyTurnStop() { notifyControlJson(R"({"type":"turn","action":"stop"})"); }
 
 bool VoiceRelayPeripheral::sendAudioFrame(const uint8_t* coded, size_t len) {
   auto& s = st();

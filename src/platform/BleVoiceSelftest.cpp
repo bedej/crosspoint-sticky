@@ -3,7 +3,6 @@
 #if defined(VOICE_BLE_SELFTEST)
 
 #include <Arduino.h>
-#include <BoardConfig.h>
 #include <Logging.h>
 #include <Microphone.h>
 
@@ -25,9 +24,9 @@
 
 namespace {
 
-constexpr uint32_t kFrameSamples = 320;   // 20 ms @ 16 kHz
-constexpr uint32_t kTurnMs = 6000;        // length of each simulated utterance
-constexpr uint32_t kGapMs = 8000;         // pause between them, to watch reconnects
+constexpr uint32_t kFrameSamples = 320;  // 20 ms @ 16 kHz
+constexpr uint32_t kTurnMs = 6000;       // length of each simulated utterance
+constexpr uint32_t kGapMs = 8000;        // pause between them, to watch reconnects
 
 }  // namespace
 
@@ -92,9 +91,8 @@ void runBleVoiceSelftest() {
     ble.notifyTurnStop();
     const uint32_t el = millis() - started;
     LOG_INF("BLEST", "turn end: %lu frames %lu dropped %lu bytes in %lums (%lu kbps, peak=%ld, link=%s)",
-            (unsigned long)frames, (unsigned long)dropped, (unsigned long)bytes,
-            (unsigned long)el, (unsigned long)(el ? bytes * 8 / el : 0), (long)peak,
-            ble.linkState().c_str());
+            (unsigned long)frames, (unsigned long)dropped, (unsigned long)bytes, (unsigned long)el,
+            (unsigned long)(el ? bytes * 8 / el : 0), (long)peak, ble.linkState().c_str());
 
     // Answers keep arriving after the utterance ends (ASR, then Hermes).
     const uint32_t until = millis() + kGapMs;

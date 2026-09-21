@@ -20,6 +20,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
+// Default off. Defined here rather than in the SDK's BoardConfig so this feature
+// needs no change to the upstream freeink-sdk submodule.
+#ifndef FREEINK_CAP_BLE_VOICE_RELAY
+#define FREEINK_CAP_BLE_VOICE_RELAY 0
+#endif
+
 #include <functional>
 #include <string>
 
