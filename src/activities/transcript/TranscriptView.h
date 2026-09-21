@@ -47,6 +47,15 @@ class TranscriptView {
   // Top line: the live ASR transcript. Non-negotiable for a voice UI — ASR
   // misfires, and the reader has to be able to tell a bad answer from a bad
   // transcription.
+  // Connection state, shown as a signal indicator at the right of the status
+  // line. The 32x32 icon assets are taller than this one reserved line, so it
+  // is drawn from primitives at the line height instead.
+  enum class Link : uint8_t { Offline, Connecting, WifiUp, Online, Failed };
+  void setLink(Link link);
+  // Capture state, shown as a filled dot beside the status. Without it there is
+  // no way to tell a live mic from a dead one.
+  void setListening(bool listening);
+
   void setHeader(const std::string& text);
   void setStatus(const std::string& text);
 
@@ -61,6 +70,18 @@ class TranscriptView {
   void endTurn();
   bool turnOpen() const { return parsed_ != nullptr; }
 
+  // --- live utterance ------------------------------------------------------
+  // The partial ASR text, shown in the position the finished turn will occupy
+  // so the words do not jump when it settles. A partial is revised on every
+  // frame, which is the exact opposite of the settled-lines-never-reflow
+  // invariant the page index rests on — so the draft is laid out separately,
+  // drawn over the space below the document's tail, and NEVER spooled or
+  // indexed. Committing the real turn through the normal path is what makes the
+  // replacement land in the same place: same font, width and origin.
+  void setDraft(const std::string& text);
+  void clearDraft();
+  bool draftNeedsRepaint() const { return draftDirty_; }
+
   // --- paging --------------------------------------------------------------
   // Each returns true when the displayed page changed and a repaint is owed.
   bool pagePrev();
@@ -74,20 +95,30 @@ class TranscriptView {
 
   // --- rendering -----------------------------------------------------------
   // New settled lines are waiting to be appended to the panel.
-  // Walk the spool once and rebuild the page index (deep-sleep wake: the file
-  // survived, RAM did not). Leaves the live cursor at the end of the session.
-  void rebuildIndex();
+  // Bring the page index back after a reset. Loads the persisted index and lays
+  // out only the turns appended since; falls back to a full rebuild when the
+  // file is missing, stale, or built for a different render spec. Leaves the
+  // live cursor at the end of the session.
+  void restoreIndex();
+  // The full re-layout, kept as the correctness backstop.
+  void rebuildIndex() { rebuildIndexFrom(0, 0, 0); }
 
   bool hasPendingAppend() const { return pendingFrom_ < lines_.size(); }
   void markFullPaint() { fullPaint_ = true; }
   bool needsFullPaint() const { return fullPaint_; }
-  // Repaint everything. Page turns pass HALF_REFRESH (it also clears FAST
-  // residual); a header/status change passes FAST_REFRESH.
-  void renderFull(HalDisplay::RefreshMode mode = HalDisplay::FAST_REFRESH);
+  // Draw everything into the framebuffer WITHOUT pushing it to the panel, so
+  // the caller can choose the refresh — page turns go through the reader's
+  // FAST-with-periodic-HALF cycle (ReaderUtils::displayWithRefreshCycle), which
+  // lives on the activity side to keep this class out of the activity headers.
+  void paintFull();
+  // paintFull() plus a plain FAST refresh.
+  void renderFull();
   // Draw only the lines settled since the last push, plus the footer, in one
   // FAST_REFRESH. Falls back to a full paint when there is no framebuffer to
   // append into.
   void renderAppend();
+  // Repaint just the draft region (plus the footer) in one FAST_REFRESH.
+  void renderDraft();
 
  private:
   size_t pageWhereTurnStarts(uint16_t turnIndex) const;
@@ -109,7 +140,18 @@ class TranscriptView {
   uint16_t layoutTurnText(Role role, uint16_t turnIndex, const std::string& text, const LineSink& sink);
   EpdFontFamily::Style styleFor(Role role) const;
 
+  void rebuildIndexFrom(uint32_t offset, uint16_t turnIndex, uint32_t docLine);
+  void saveIndex() const;
+  void layoutDraft();
+  // Lines left on this page under the document's tail.
+  uint16_t draftRoom() const;
+  bool showsDraft() const;
+  void drawDraft();
+  void eraseFrom(size_t lineIndex) const;
+
   void drawHeader() const;
+  // Returns the width it occupied, so the status text knows where to stop.
+  int drawLinkIndicator(int right, int top) const;
   void drawLine(size_t index) const;
   void drawFooter() const;
   int lineY(size_t index) const { return bodyTop_ + static_cast<int>(index) * lineAdvance_; }
@@ -128,6 +170,8 @@ class TranscriptView {
   uint16_t linesPerPage_ = 0;
 
   // chrome
+  Link link_ = Link::Offline;
+  bool listening_ = false;
   std::string header_;
   std::string status_;
 
@@ -148,6 +192,9 @@ class TranscriptView {
   bool paragraphOpen_ = false;
   std::string pendingWord_;  // word fragment carried across delta boundaries
 
-  // scratch for the replay path, so a page turn does not churn the heap
-  std::vector<Line> scratch_;
+  // live utterance (provisional, never spooled)
+  std::string draft_;
+  std::vector<Line> draftLines_;
+  bool draftDirty_ = false;
+  bool draftWasDrawn_ = false;
 };

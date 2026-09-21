@@ -658,6 +658,8 @@ void loop() {
         // Test hooks for the conversation transcript view — see
         // AgentVoiceActivity::injectUserTurn.
         AgentVoiceActivity::injectUserTurn(cmd.substring(4).c_str());
+      } else if (cmd.startsWith("PARTIAL ")) {
+        AgentVoiceActivity::injectPartial(cmd.substring(8).c_str());
       } else if (cmd.startsWith("SAY ")) {
         AgentVoiceActivity::injectAgentTurn(cmd.substring(4).c_str());
       } else if (cmd == "PAGENEXT") {
@@ -743,8 +745,15 @@ void loop() {
   static bool powerReleasedSinceWake = false;
   if (!gpio.isPressed(HalGPIO::BTN_POWER)) powerReleasedSinceWake = true;
 
+  // Default 400 ms (10 ms when the short-press action is SLEEP), which is
+  // shorter than a deliberate press feels — an activity that binds a short
+  // power press can raise the bar so a tap reaches it and only a real hold
+  // sleeps.
+  const unsigned long activityHold = activityManager.powerHoldSleepMs();
+  const unsigned long powerHoldMs =
+      activityHold > SETTINGS.getPowerButtonDuration() ? activityHold : SETTINGS.getPowerButtonDuration();
   if (powerReleasedSinceWake && millis() >= allowSleepAt && gpio.isPressed(HalGPIO::BTN_POWER) &&
-      gpio.getPowerButtonHeldTime() > SETTINGS.getPowerButtonDuration()) {
+      gpio.getPowerButtonHeldTime() > powerHoldMs) {
     // If the screenshot combination is potentially being pressed, don't sleep
     if (gpio.isPressed(HalGPIO::BTN_DOWN)) {
       return;

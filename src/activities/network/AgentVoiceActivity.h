@@ -14,7 +14,9 @@
 #include <Microphone.h>
 #include <WebSocketsClient.h>
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "activities/Activity.h"
 #include "activities/transcript/ConversationSpool.h"
@@ -37,6 +39,11 @@ class AgentVoiceActivity : public Activity {
   // exactly the same spool + layout path a real turn does; injected agent text
   // is dripped in chunks so the streaming cadence is the real one.
   static void injectUserTurn(const char* text) { injectUser_ = text; }
+  // Simulate an ASR partial, to check the draft and its in-place replacement.
+  static void injectPartial(const char* text) {
+    injectPartial_ = text;
+    injectPartialPending_ = true;
+  }
   static void injectAgentTurn(const char* text) {
     injectAgent_ = text;
     injectAgentAt_ = 0;
@@ -48,6 +55,12 @@ class AgentVoiceActivity : public Activity {
   // Keep the device awake and the loop hot while a conversation is live.
   bool preventAutoSleep() override { return state_ != State::Idle && state_ != State::Error; }
   bool skipLoopDelay() override { return wsConnected_; }
+  // Power is push-to-talk here. The stock 400 ms hold-to-sleep is shorter than
+  // a deliberate press, so pressing to talk slept the device instead — and the
+  // retained sleep frame made it look like nothing had happened at all. A hold
+  // this long is unambiguous, and still sleeps.
+  unsigned long powerHoldSleepMs() const override { return kPowerSleepHoldMs; }
+  static constexpr unsigned long kPowerSleepHoldMs = 1500;
 
   // WS event trampoline (WebSocketsClient takes a C callback).
   void onWsEvent(WStype_t type, uint8_t* payload, size_t len);
@@ -55,14 +68,23 @@ class AgentVoiceActivity : public Activity {
  private:
   static inline volatile bool pttRequested_ = false;
   static inline std::string injectUser_;
+  static inline std::string injectPartial_;
+  static inline volatile bool injectPartialPending_ = false;
   static inline std::string injectAgent_;
   static inline size_t injectAgentAt_ = 0;
   static inline volatile int8_t pageRequest_ = 0;
   void pumpInjectedTurns();
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
-  bool loadConfig();   // token/host/port from /.crosspoint/voice.json (SD)
-  void connectWifi();  // STA from saved creds
+  bool loadConfig();  // token/host/port from /.crosspoint/voice.json (SD)
+  void startWifi();   // STA from saved creds — begins, never waits
+  void pumpLink();    // watch the association, open the socket when it is up
+  // Pre-connect capture. Audio is buffered while the socket is down and drained
+  // in order once it is up, so the user can start talking immediately.
+  void bufferPcm(const uint8_t* data, size_t len);
+  void drainPcmBuffer();
+  void releasePcmBuffer();
+  bool pcmBufferEmpty() const { return segments_.empty(); }
   void startListening();
   void stopListening();  // sends {"type":"end"}
   void pumpMic();        // read frames -> ws.sendBIN while Listening
@@ -71,10 +93,12 @@ class AgentVoiceActivity : public Activity {
   // Paging. INHERITED from the reader rather than invented: the tap zones, the
   // button mapping and the turn guard all come from ReaderUtils/EpubReader so a
   // conversation feels identical to a book.
+  bool handleVoiceButtons();  // returns true when the activity finished
   void handlePaging();
   void applyPendingTurn();
   void openSpoolTurn(ConversationSpool::Role role, const char* text);
   void appendAnswerText(const char* text);  // Markdown-stripped append
+  void flushPendingMarker();                // resolve a marker run across deltas
   void finishAnswer();
   void failTurnIfInFlight(const char* msg);  // Listening/Answering -> Idle + error
 
@@ -85,6 +109,23 @@ class AgentVoiceActivity : public Activity {
   freeink::Microphone mic_;
   WebSocketsClient ws_;
   bool wsConnected_ = false;
+  bool wsStarted_ = false;        // ws_.begin() has been called
+  unsigned long wifiStartedAt_ = 0;
+  static constexpr unsigned long kWifiTimeoutMs = 25000;
+  static constexpr unsigned long kWifiRetryMs = 10000;
+
+  // Audio captured before the socket came up. Segmented rather than one large
+  // block: this heap is fragmented enough that a single ~128 KB request is the
+  // kind of allocation that fails (see the ParsedText deque note), and PSRAM is
+  // deliberately off for env:sticky.
+  static constexpr size_t kPcmSegmentBytes = 8192;
+  static constexpr size_t kPcmMaxSegments = 16;  // ~4 s at 16 kHz mono PCM16
+  std::vector<std::unique_ptr<uint8_t[]>> segments_;
+  size_t segmentFill_ = 0;   // bytes used in the last segment
+  size_t drainSegment_ = 0;  // next segment to send
+  size_t drainOffset_ = 0;
+  bool pcmOverflowed_ = false;
+  bool pendingEnd_ = false;  // end-of-utterance held back until the audio is sent
 
   State state_ = State::Connecting;
   ConversationSpool spool_;
@@ -96,7 +137,8 @@ class AgentVoiceActivity : public Activity {
   bool pendingTurnSkip_ = false;  // long-press back: previous TURN
   bool pendingJumpLatest_ = false;
   unsigned long lastPageTurnMs_ = 0;
-  bool nextRefreshHalf_ = false;  // page turns get a HALF_REFRESH
+  int pagesUntilFullRefresh_ = 1;  // counts down to the next HALF refresh, as the reader's does
+  bool nextIsPageTurn_ = false;  // routes the next repaint through the reader's refresh cycle
 
   std::string status_;      // one-line status/header
   std::string transcript_;  // latest ASR text (partial/final)
@@ -118,6 +160,10 @@ class AgentVoiceActivity : public Activity {
   int32_t dcState_ = 0;
   bool dcPrimed_ = false;
   bool gotTranscript_ = false;
+  // An emphasis run that a delta ended part way through: deltas split anywhere,
+  // including between the two chars of a '**'.
+  char pendingMarker_ = '\0';
+  uint8_t pendingCount_ = 0;
 
   // Per-listen mic level stats (logged on stop) — near-zero => mic sent silence.
   int16_t micPeak_ = 0;

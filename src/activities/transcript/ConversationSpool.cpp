@@ -319,6 +319,114 @@ bool ConversationSpool::applySpec(const RenderSpec& spec) {
   return true;
 }
 
+namespace {
+// Bumped whenever the on-disk layout below changes, so a stale file is
+// rejected rather than misread.
+constexpr uint32_t kIndexMagic = 0x58444953;  // "SIDX"
+constexpr uint8_t kIndexVersion = 1;
+
+struct IndexHeader {
+  uint32_t magic;
+  uint8_t version;
+  uint8_t pad[3];
+  int32_t fontId;
+  uint16_t viewportWidth;
+  uint16_t linesPerPage;
+  uint8_t fontPointSize;
+  uint8_t pad2[3];
+  uint32_t spoolSize;    // the spool this index was built against
+  uint32_t spoolOffset;  // resume cursor
+  uint32_t docLine;
+  uint16_t turnIndex;
+  uint16_t pad3;
+  uint32_t pageCount;
+};
+}  // namespace
+
+std::string ConversationSpool::indexPath() const {
+  return std::string(kSessionDir) + "/" + sessionId_ + ".idx";
+}
+
+bool ConversationSpool::saveIndex(const IndexCursor& cursor) const {
+  if (!open_) return false;
+  IndexHeader h{};
+  h.magic = kIndexMagic;
+  h.version = kIndexVersion;
+  h.fontId = spec_.fontId;
+  h.viewportWidth = spec_.viewportWidth;
+  h.linesPerPage = spec_.linesPerPage;
+  h.fontPointSize = spec_.fontPointSize;
+  h.spoolSize = size_;
+  h.spoolOffset = cursor.spoolOffset;
+  h.docLine = cursor.docLine;
+  h.turnIndex = cursor.turnIndex;
+  h.pageCount = static_cast<uint32_t>(pages_.size());
+
+  const std::string path = indexPath();
+  HalFile f = Storage.open(path.c_str(), O_WRITE | O_CREAT | O_TRUNC);
+  if (!f) {
+    LOG_ERR("SPOOL", "cannot write %s", path.c_str());
+    return false;
+  }
+  bool ok = f.write(reinterpret_cast<const uint8_t*>(&h), sizeof(h)) == sizeof(h);
+  if (ok && !pages_.empty()) {
+    const size_t bytes = pages_.size() * sizeof(PageRef);
+    ok = f.write(reinterpret_cast<const uint8_t*>(pages_.data()), bytes) == bytes;
+  }
+  f.flush();
+  f.close();
+  if (!ok) {
+    // A half-written index would be read back as truth, so remove it and let
+    // the next boot rebuild instead.
+    Storage.remove(path.c_str());
+    LOG_ERR("SPOOL", "index write failed, removed");
+    return false;
+  }
+  return true;
+}
+
+bool ConversationSpool::loadIndex(IndexCursor& cursor) {
+  if (!open_) return false;
+  HalFile f;
+  if (!Storage.openFileForRead("SPOOL", indexPath(), f) || !f) return false;
+
+  IndexHeader h{};
+  bool ok = f.read(&h, sizeof(h)) == static_cast<int>(sizeof(h));
+  ok = ok && h.magic == kIndexMagic && h.version == kIndexVersion;
+  // A spec change means the file describes a different layout entirely, and a
+  // spool shorter than the index means it was replaced underneath us.
+  ok = ok && h.fontId == spec_.fontId && h.viewportWidth == spec_.viewportWidth &&
+       h.linesPerPage == spec_.linesPerPage && h.fontPointSize == spec_.fontPointSize;
+  ok = ok && h.spoolSize <= size_ && h.spoolOffset <= size_;
+  if (!ok) {
+    f.close();
+    return false;
+  }
+
+  pages_.clear();
+  if (h.pageCount > 0) {
+    if (h.pageCount > 65535) {  // refuse an absurd count rather than allocate on it
+      f.close();
+      return false;
+    }
+    pages_.resize(h.pageCount);
+    const size_t bytes = pages_.size() * sizeof(PageRef);
+    if (f.read(pages_.data(), bytes) != static_cast<int>(bytes)) {
+      pages_.clear();
+      f.close();
+      return false;
+    }
+  }
+  f.close();
+
+  cursor.spoolOffset = h.spoolOffset;
+  cursor.turnIndex = h.turnIndex;
+  cursor.docLine = h.docLine;
+  LOG_INF("SPOOL", "index loaded: %u pages, resume at %u/%u", static_cast<unsigned>(pages_.size()),
+          static_cast<unsigned>(cursor.spoolOffset), static_cast<unsigned>(size_));
+  return true;
+}
+
 size_t ConversationSpool::firstPageOfTurn(const uint16_t turnIndex) const {
   for (size_t i = 0; i < pages_.size(); ++i) {
     if (pages_[i].turnIndex >= turnIndex) return i;

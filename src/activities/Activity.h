@@ -43,6 +43,11 @@ class Activity {
 
   virtual bool skipLoopDelay() { return false; }
   virtual bool preventAutoSleep() { return false; }
+  // How long the power button must be HELD to sleep the device while this
+  // activity is up; 0 keeps SETTINGS.getPowerButtonDuration(). An activity that
+  // binds a short power press to something of its own raises this so a tap
+  // reaches it instead of sleeping the device out from under the user.
+  virtual unsigned long powerHoldSleepMs() const { return 0; }
   // Exclusive storage activities suspend global controls and normal activity
   // transitions so no filesystem code races a raw SD-card owner.
   virtual bool requiresExclusiveStorageLoop() const { return false; }

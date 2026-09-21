@@ -1,6 +1,7 @@
 #include "AgentVoiceActivity.h"
 
 #include "activities/RenderLock.h"
+#include "CrossPointSettings.h"
 #include "activities/reader/ReaderUtils.h"
 
 #include <ArduinoJson.h>
@@ -37,11 +38,11 @@ AgentVoiceActivity::~AgentVoiceActivity() {
   if (g_voiceInstance == this) g_voiceInstance = nullptr;
 }
 
-void AgentVoiceActivity::connectWifi() {
-  status_ = "Connecting Wi-Fi...";
-  requestUpdate();
-  // VERIFY: WifiSelectionActivity holds a RenderLock around loadFromFile() because
-  // the SD card and the e-paper share the SPI bus. Mirror that if you see SPI races.
+void AgentVoiceActivity::startWifi() {
+  // Begins the association and returns. Nothing on this screen needs the
+  // network — the spool is on the card and the document renders from it — so
+  // making the user watch a "Connecting Wi-Fi..." screen for four seconds (and
+  // up to fifteen on a bad day) bought nothing.
   WIFI_STORE.loadFromFile();
   std::string ssid = WIFI_STORE.getLastConnectedSsid();
   auto cred = WIFI_STORE.findCredential(ssid);  // std::optional<WifiCredential>
@@ -49,19 +50,124 @@ void AgentVoiceActivity::connectWifi() {
   WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true, true);
-  delay(100);
   WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
   WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   if (cred.has_value()) {
     WiFi.begin(cred->ssid.c_str(), cred->password.c_str());
   } else if (ssid.length()) {
     WiFi.begin(ssid.c_str());
+  } else {
+    LOG_ERR("AVA", "no saved wifi credentials");
   }
-  const unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 15000) {
-    delay(200);
+  wifiStartedAt_ = millis();
+  wsStarted_ = false;
+  view_.setLink(TranscriptView::Link::Connecting);
+}
+
+// Association progress, watched from the loop instead of waited on.
+void AgentVoiceActivity::pumpLink() {
+  if (state_ == State::Error) return;
+
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!wsStarted_) {
+      LOG_INF("AVA", "wifi ok ip=%s rssi=%d", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+      const std::string path = "/v1/stream?token=" + token_;
+      LOG_INF("AVA", "ws connecting %s:%u/v1/stream", host_.c_str(), (unsigned)port_);
+      ws_.begin(host_.c_str(), port_, path.c_str());
+      ws_.onEvent(wsTrampoline);
+      ws_.setReconnectInterval(3000);
+      wsStarted_ = true;
+    }
+    view_.setLink(wsConnected_ ? TranscriptView::Link::Online : TranscriptView::Link::WifiUp);
+    return;
+  }
+
+  // Not associated. Retry periodically rather than stranding the activity —
+  // the user may well be talking into the buffer while this runs.
+  if (millis() - wifiStartedAt_ > kWifiTimeoutMs) {
+    view_.setLink(TranscriptView::Link::Failed);
+    if (millis() - wifiStartedAt_ > kWifiTimeoutMs + kWifiRetryMs) {
+      LOG_ERR("AVA", "wifi still down, retrying");
+      startWifi();
+    }
+    return;
+  }
+  view_.setLink(TranscriptView::Link::Connecting);
+}
+
+// --- pre-connect audio buffer ----------------------------------------------
+
+void AgentVoiceActivity::bufferPcm(const uint8_t* data, const size_t len) {
+  size_t written = 0;
+  while (written < len) {
+    if (segments_.empty() || segmentFill_ == kPcmSegmentBytes) {
+      if (segments_.size() >= kPcmMaxSegments) {
+        // The ceiling drops the NEWEST audio, never the oldest: a command's verb
+        // is at the front of the utterance, so keeping the tail would be worse
+        // than useless. The state is surfaced rather than swallowed.
+        if (!pcmOverflowed_) {
+          pcmOverflowed_ = true;
+          LOG_ERR("AVA", "pre-connect buffer full at %u bytes", (unsigned)(segments_.size() * kPcmSegmentBytes));
+        }
+        framesDropped_++;
+        return;
+      }
+      auto seg = std::unique_ptr<uint8_t[]>(new (std::nothrow) uint8_t[kPcmSegmentBytes]);
+      if (!seg) {
+        pcmOverflowed_ = true;
+        framesDropped_++;
+        return;
+      }
+      segments_.push_back(std::move(seg));
+      segmentFill_ = 0;
+    }
+    const size_t room = kPcmSegmentBytes - segmentFill_;
+    const size_t take = (len - written) < room ? (len - written) : room;
+    memcpy(segments_.back().get() + segmentFill_, data + written, take);
+    segmentFill_ += take;
+    written += take;
   }
 }
+
+void AgentVoiceActivity::drainPcmBuffer() {
+  if (!wsConnected_ || segments_.empty()) return;
+  // Sent in the same 20 ms frames the live path uses — the service reads a
+  // frame stream, not a blob — and rate-limited so a drain cannot monopolise
+  // the loop while the panel still has to render.
+  constexpr size_t kFrameBytes = 320 * sizeof(int16_t);
+  constexpr int kFramesPerPass = 8;
+  for (int sent = 0; sent < kFramesPerPass && drainSegment_ < segments_.size(); ++sent) {
+    const bool last = (drainSegment_ + 1 == segments_.size());
+    const size_t available = (last ? segmentFill_ : kPcmSegmentBytes) - drainOffset_;
+    if (available == 0) {
+      drainSegment_++;
+      drainOffset_ = 0;
+      continue;
+    }
+    const size_t take = available < kFrameBytes ? available : kFrameBytes;
+    ws_.sendBIN(segments_[drainSegment_].get() + drainOffset_, take);
+    bytesSent_ += static_cast<uint32_t>(take);
+    drainOffset_ += take;
+  }
+  if (drainSegment_ >= segments_.size()) {
+    LOG_INF("AVA", "pre-connect buffer drained");
+    releasePcmBuffer();
+    if (pendingEnd_) {
+      pendingEnd_ = false;
+      ws_.sendTXT("{\"type\":\"end\"}");
+    }
+  }
+}
+
+void AgentVoiceActivity::releasePcmBuffer() {
+  segments_.clear();
+  segments_.shrink_to_fit();
+  segmentFill_ = 0;
+  drainSegment_ = 0;
+  drainOffset_ = 0;
+  pcmOverflowed_ = false;
+}
+
 
 bool AgentVoiceActivity::loadConfig() {
   host_ = VOICE_HOST_DEFAULT;
@@ -98,15 +204,6 @@ void AgentVoiceActivity::onEnter() {
 
   LOG_INF("AVA", "config host=%s port=%u tokenLen=%u", host_.c_str(), (unsigned)port_, (unsigned)token_.length());
 
-  connectWifi();
-  if (WiFi.status() != WL_CONNECTED) {
-    LOG_ERR("AVA", "wifi connect failed (status=%d)", (int)WiFi.status());
-    state_ = State::Error;
-    status_ = "Wi-Fi failed. Set it up in File Transfer / Wi-Fi Networks.";
-    requestUpdate();
-    return;
-  }
-  LOG_INF("AVA", "wifi ok ip=%s rssi=%d", WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
   LOG_INF("AVA", "reset reason=%d", (int)esp_reset_reason());
   logMicPinOwnership("voice-before-begin");
   // The sleep path (PowerManager::powerDownRailsForSleep) holds the mic enable
@@ -126,18 +223,13 @@ void AgentVoiceActivity::onEnter() {
   logMicPinOwnership("voice-after-begin");
   logMicPinActivity("voice-after-begin");
 
-  const std::string path = "/v1/stream?token=" + token_;
-  LOG_INF("AVA", "ws connecting %s:%u%s", host_.c_str(), (unsigned)port_, "/v1/stream");
-  ws_.begin(host_.c_str(), port_, path.c_str());
-  ws_.onEvent(wsTrampoline);
-  ws_.setReconnectInterval(3000);
-
   // The spool is the conversation. Deep sleep wakes through a reset, so the
   // page index is gone even though the text is not — rebuild it from the raw
   // records and land on the latest page.
   view_.begin();
+  pagesUntilFullRefresh_ = SETTINGS.getRefreshFrequency();
   if (spool_.begin()) {
-    view_.rebuildIndex();
+    view_.restoreIndex();
     view_.jumpToLatest();
     LOG_INF("AVA", "session %s: %u turns, %u pages", spool_.sessionId().c_str(),
             static_cast<unsigned>(spool_.turnCount()), static_cast<unsigned>(spool_.pageCount()));
@@ -145,9 +237,12 @@ void AgentVoiceActivity::onEnter() {
     LOG_ERR("AVA", "spool unavailable; transcript will not persist");
   }
 
+  // Paint the restored conversation NOW, then bring the link up behind it.
   state_ = State::Idle;
-  status_ = "Press Up to talk  |  Down to exit";
-  requestUpdate();
+  status_ = "Power to talk  |  Up/Down pages  |  hold Down exits";
+  requestUpdateAndWait();
+
+  startWifi();
 }
 
 void AgentVoiceActivity::onExit() {
@@ -155,6 +250,7 @@ void AgentVoiceActivity::onExit() {
   spool_.endAgentTurn();
   mic_.end();
   ws_.disconnect();
+  releasePcmBuffer();
   WiFi.disconnect(false);
   g_voiceInstance = nullptr;
   Activity::onExit();
@@ -186,18 +282,26 @@ void AgentVoiceActivity::pumpMic() {
     if (a > micPeak_) micPeak_ = static_cast<int16_t>(a);
   }
   micCount_ += static_cast<uint32_t>(n);
-  if (wsConnected_) {
+  if (wsConnected_ && pcmBufferEmpty()) {
     ws_.sendBIN(reinterpret_cast<uint8_t*>(micBuf_), static_cast<size_t>(n) * sizeof(int16_t));
     bytesSent_ += static_cast<uint32_t>(n) * sizeof(int16_t);
   } else {
-    framesDropped_++;
+    // Either the socket is not up yet, or earlier audio is still draining.
+    // Live frames have to queue behind it either way, or the utterance reaches
+    // the service out of order.
+    bufferPcm(reinterpret_cast<const uint8_t*>(micBuf_), static_cast<size_t>(n) * sizeof(int16_t));
   }
 }
 
 void AgentVoiceActivity::startListening() {
+  view_.clearDraft();
+  releasePcmBuffer();  // anything left from a capture that never reached the wire
+  pendingEnd_ = false;
   dcState_ = 0;
   dcPrimed_ = false;
   gotTranscript_ = false;
+  pendingMarker_ = '\0';
+  pendingCount_ = 0;
   transcript_.clear();
   answer_.clear();
   micPeak_ = 0;
@@ -277,9 +381,7 @@ void AgentVoiceActivity::applyPendingTurn() {
   if (!changed) return;
 
   lastPageTurnMs_ = millis();
-  // Every page turn is a HALF_REFRESH, which conveniently doubles as the
-  // periodic FAST-residual cleanup: a screenful is ~14-18 FAST line appends.
-  nextRefreshHalf_ = true;
+  nextIsPageTurn_ = true;
   requestUpdate();
 }
 
@@ -294,9 +396,15 @@ void AgentVoiceActivity::openSpoolTurn(const ConversationSpool::Role role, const
 // the spool write, the incremental layout and the per-line refresh are all the
 // real ones, so what this verifies is what a real turn does.
 void AgentVoiceActivity::pumpInjectedTurns() {
+  if (injectPartialPending_) {
+    injectPartialPending_ = false;
+    view_.setDraft(injectPartial_);
+  }
+
   if (!injectUser_.empty()) {
     const std::string text = injectUser_;
     injectUser_.clear();
+    view_.clearDraft();
     if (spool_.appendUserTurn(text)) {
       openSpoolTurn(ConversationSpool::Role::User, text.c_str());
       view_.endTurn();
@@ -325,7 +433,7 @@ void AgentVoiceActivity::pumpInjectedTurns() {
       injectAgentAt_ = 0;
       view_.endTurn();
       spool_.endAgentTurn();
-      nextRefreshHalf_ = true;
+      nextIsPageTurn_ = true;
       requestUpdate();
     }
   }
@@ -343,35 +451,69 @@ void AgentVoiceActivity::pumpInjectedTurns() {
   }
 }
 
+// Button model, set by Bede after using the device:
+//   Up     short = previous page    hold = previous TURN
+//   Down   short = next page        hold = leave the activity
+//   Power  short = start/stop listening   (hold still sleeps, in main.cpp)
+//
+// Power is usable here despite this activity's original claim that main.cpp
+// eats it: main.cpp only consumes a HELD power button, and it sleeps the device
+// while the button is still down, so a release reaching this point is always a
+// short press. The Power+Down screenshot combo is likewise consumed in main.cpp
+// before the activity loop runs.
+//
+// Returns true when the activity has finished and the caller must stop touching
+// it.
+bool AgentVoiceActivity::handleVoiceButtons() {
+  const bool pttSerial = pttRequested_;
+  pttRequested_ = false;
+  const bool powerTap =
+      mappedInput.wasReleased(MappedInputManager::Button::Power) && mappedInput.getHeldTime() < kPowerSleepHoldMs;
+  if (pttSerial || powerTap) {
+    // Talking is always about the live tail: snap forward before capturing so a
+    // reply never streams onto a page the reader has paged away from.
+    pendingJumpLatest_ = true;
+    LOG_INF("AVA", "talk toggle (state=%d ws=%d)", (int)state_, (int)wsConnected_);
+    if (state_ == State::Listening) {
+      stopListening();
+    } else if (state_ == State::Idle || state_ == State::Answering) {
+      startListening();
+    }
+  }
+
+  // wasLongPressed fires while the button is still down and suppresses the
+  // release that follows, so the short-press branch cannot fire for the same
+  // press and a hold never also turns a page.
+  if (mappedInput.wasLongPressed(MappedInputManager::Button::Up, ReaderUtils::SKIP_HOLD_MS)) {
+    pendingTurnSkip_ = true;
+  } else if (mappedInput.wasReleased(MappedInputManager::Button::Up)) {
+    pendingManualTurn_ = -1;
+  }
+
+  if (mappedInput.wasLongPressed(MappedInputManager::Button::Down, ReaderUtils::GO_BACK_OR_HOME_MS)) {
+    finish();
+    return true;
+  }
+  if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
+    pendingManualTurn_ = 1;
+  }
+  return false;
+}
+
 void AgentVoiceActivity::loop() {
   ws_.loop();
+  pumpLink();
+  drainPcmBuffer();
+  if (pendingEnd_ && wsConnected_ && pcmBufferEmpty()) {
+    pendingEnd_ = false;
+    ws_.sendTXT("{\"type\":\"end\"}");
+  }
   if (state_ == State::Listening) pumpMic();
 
   // The Sticky's AI-Voice button IS CrossPoint's Power button, which main.cpp consumes
   // for sleep before an activity sees it — so push-to-talk uses the Up side button,
   // and Down exits back to the menu.
-  const bool pttSerial = pttRequested_;
-  pttRequested_ = false;
-  if (pttSerial || mappedInput.wasReleased(MappedInputManager::Button::Up)) {
-    // Talking is always about the live tail: snap forward before capturing so a
-    // reply never streams onto a page the reader has paged away from.
-    pendingJumpLatest_ = true;
-    if (state_ == State::Idle || state_ == State::Answering) {
-      startListening();
-    } else if (state_ == State::Listening) {
-      stopListening();
-    }
-  }
-  if (mappedInput.wasReleased(MappedInputManager::Button::Down)) {
-    // Back returns to the live tail if the reader is behind it; only an
-    // already-current view exits.
-    if (!view_.atLatest()) {
-      pendingJumpLatest_ = true;
-    } else {
-      finish();
-      return;
-    }
-  }
+  if (handleVoiceButtons()) return;  // the activity finished
 
   pumpInjectedTurns();
   handlePaging();
@@ -381,6 +523,7 @@ void AgentVoiceActivity::loop() {
   // nothing) surface an error instead of hanging on "Thinking...".
   if (state_ == State::Answering && millis() - lastServerMs_ > kStallTimeoutMs) {
     LOG_ERR("AVA", "answer stalled >%lums, resetting", kStallTimeoutMs);
+    view_.clearDraft();
     state_ = State::Idle;
     status_ = "No response. Press Up to try again.";
     requestUpdate(true);
@@ -391,7 +534,11 @@ void AgentVoiceActivity::loop() {
   // so a screen fills in ~6 s while reading it takes ~55 s; the layout engine
   // holds the ragged tail back and only completed lines reach the panel.
   const bool linesWaiting = view_.hasPendingAppend() || view_.needsFullPaint();
-  if ((dirty_ || linesWaiting) && millis() - lastRenderMs_ > 250) {
+  // A settled line is final and paces itself. A draft is revised on every ASR
+  // frame, far faster than the panel can settle, so it gets a slower coalesce
+  // and is accepted as approximate until the transcript finalises.
+  const unsigned long quiet = linesWaiting ? 250 : 400;
+  if ((dirty_ || linesWaiting || view_.draftNeedsRepaint()) && millis() - lastRenderMs_ > quiet) {
     dirty_ = false;
     lastRenderMs_ = millis();
     requestUpdate();
@@ -400,30 +547,54 @@ void AgentVoiceActivity::loop() {
 
 void AgentVoiceActivity::markDirty() { dirty_ = true; }
 
+// Resolve a run of emphasis markers that has ended. Two or more in a row is a
+// Markdown marker and disappears; a lone one is a real character ("2 * 3",
+// "snake_case") and survives.
+void AgentVoiceActivity::flushPendingMarker() {
+  if (pendingCount_ == 1 && pendingMarker_ != '\0') answer_ += pendingMarker_;
+  pendingCount_ = 0;
+  pendingMarker_ = '\0';
+}
+
 void AgentVoiceActivity::appendAnswerText(const char* text) {
   // Hermes answers in Markdown; e-paper has one face and no styling, so the
-  // emphasis/code runs would render as literal **asterisks**. Strip the inline
-  // markers as deltas arrive (they never split mid-marker in practice, and a
-  // stray single char is harmless).
+  // emphasis runs would otherwise render as literal **asterisks**.
+  //
+  // A delta can end anywhere, INCLUDING between the two characters of a '**'.
+  // Judging a marker by what happens to be in the current delta therefore gets
+  // it wrong at chunk boundaries and leaves both asterisks on the panel, so an
+  // unfinished run is carried in pendingMarker_/pendingCount_ and resolved
+  // against whatever arrives next instead.
   for (const char* p = text; *p; ++p) {
     if (*p == '`') continue;
-    if (*p == '*' && (p[1] == '*' || (p != text && p[-1] == '*'))) continue;
-    if (*p == '_' && p[1] == '_') {
-      ++p;
+    if (*p == '*' || *p == '_') {
+      if (pendingMarker_ != '\0' && pendingMarker_ != *p) flushPendingMarker();
+      pendingMarker_ = *p;
+      if (pendingCount_ < 0xFF) pendingCount_++;
       continue;
     }
+    flushPendingMarker();
     answer_ += *p;
   }
 }
 
 void AgentVoiceActivity::finishAnswer() {
+  // A marker run still open at the end resolves now; route it through the spool
+  // and the view like any other delta rather than letting it sit in answer_.
+  const size_t before = answer_.length();
+  flushPendingMarker();
+  if (answer_.length() > before) {
+    const std::string tail = answer_.substr(before);
+    spool_.appendAgentDelta(tail);
+    view_.appendText(tail.c_str());
+  }
   // Flush the ragged tail the layout engine was holding, and close the turn so
   // the next reply starts a fresh one in the spool.
   view_.endTurn();
   spool_.endAgentTurn();
-  nextRefreshHalf_ = true;
+  nextIsPageTurn_ = true;
   state_ = State::Idle;
-  status_ = "Press Up to talk  |  Down to exit";
+  status_ = "Power to talk  |  Up/Down pages  |  hold Down exits";
   dirty_ = false;
   lastRenderMs_ = 0;
   requestUpdate(true);  // one clean full-ish refresh at the end
@@ -490,19 +661,19 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
       LOG_INF("AVA", "final transcript: '%s'", transcript_.c_str());
       // The finalised ASR text is the user's turn: persist it and flow it into
       // the document in italic, so it can be paged back to like any other turn.
+      view_.clearDraft();
       if (!transcript_.empty() && spool_.appendUserTurn(transcript_)) {
         openSpoolTurn(ConversationSpool::Role::User, transcript_.c_str());
         view_.endTurn();
       }
     }
-    // The header is LIVE feedback only: it shows what ASR is hearing while the
-    // words have nowhere else to be. The moment the transcript is final it
-    // becomes a turn in the document below, so the header hands off rather than
-    // showing the same sentence twice.
+    // The words go where they are about to live, not into a status line: the
+    // partial renders as a draft in the position the finished turn will occupy,
+    // and committing the real turn above replaced it in place.
     if (gotTranscript_) {
-      view_.setHeader(std::string());
+      view_.clearDraft();
     } else {
-      view_.setHeader(transcript_.empty() ? std::string() : ("You: " + transcript_));
+      view_.setDraft(transcript_);
     }
     markDirty();
   } else if (!strcmp(t, "answer.delta")) {
@@ -526,6 +697,7 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     finishAnswer();
   } else if (!strcmp(t, "error")) {
     LOG_ERR("AVA", "server error: %s", static_cast<const char*>(doc["message"] | ""));
+    view_.clearDraft();
     state_ = State::Idle;  // don't strand the user in "Thinking..."
     status_ = std::string("Error: ") + static_cast<const char*>(doc["message"] | "");
     requestUpdate(true);
@@ -548,11 +720,23 @@ void AgentVoiceActivity::render(RenderLock&&) {
   }
 
   view_.setStatus(status_);
-  const auto mode = nextRefreshHalf_ ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH;
-  nextRefreshHalf_ = false;
+  view_.setListening(state_ == State::Listening);
+  const bool pageTurn = nextIsPageTurn_;
+  nextIsPageTurn_ = false;
   if (view_.needsFullPaint()) {
-    view_.renderFull(mode);
+    view_.paintFull();
+    if (pageTurn) {
+      // The book reader's cadence, reused rather than reinvented: a page turn is
+      // a FAST refresh, and every SETTINGS.getRefreshFrequency() turns one is
+      // promoted to a HALF refresh to clear the residue FAST leaves behind.
+      // Paying 1720 ms on every single turn, as this used to, buys nothing.
+      ReaderUtils::displayWithRefreshCycle(renderer, pagesUntilFullRefresh_);
+    } else {
+      renderer.displayBuffer(HalDisplay::FAST_REFRESH);
+    }
+  } else if (view_.hasPendingAppend()) {
+    view_.renderAppend();  // also picks up any draft change
   } else {
-    view_.renderAppend();
+    view_.renderDraft();
   }
 }

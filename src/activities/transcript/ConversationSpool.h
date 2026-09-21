@@ -115,7 +115,23 @@ class ConversationSpool {
   // Index of the first page that opens on or after `turnIndex`, or pageCount().
   size_t firstPageOfTurn(uint16_t turnIndex) const;
 
+  // Where a saved index stops. It always sits on a TURN BOUNDARY, so resuming
+  // needs no mid-turn layout state.
+  struct IndexCursor {
+    uint32_t spoolOffset = 0;  // START record of the first unindexed turn
+    uint16_t turnIndex = 0;    // its index
+    uint32_t docLine = 0;      // settled lines in the document before it
+  };
+
+  // The page index is derived data written beside the spool. Losing it costs
+  // time (a full re-layout), never content.
+  bool saveIndex(const IndexCursor& cursor) const;
+  // Restores pages_ and `cursor` when the file matches the current spec and the
+  // spool it describes. Returns false when the caller must rebuild from scratch.
+  bool loadIndex(IndexCursor& cursor);
+
  private:
+  std::string indexPath() const;
   bool scan();  // one pass over the file: count turns, find the last turn start
   bool appendRecord(Role role, bool continuation, const std::string& text);
   static void appendJsonEscaped(std::string& out, const std::string& in);
