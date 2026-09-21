@@ -63,15 +63,32 @@ State& st() {
 constexpr const char* kPrefNamespace = "vrelay";
 constexpr const char* kPrefPaired = "paired";
 
+// Cached after the first read. The UI asks for this on every render and every
+// poll, and NVS is the wrong place to go at that rate — worse here than usual,
+// because NimBLE writes its own bond and CCCD records to NVS whenever a phone
+// is connected, so a screen that reopened the namespace every second was
+// contending with the live link.
+bool pairedCache = false;
+bool pairedCacheValid = false;
+
 bool voicePhonePaired() {
+  if (pairedCacheValid) return pairedCache;
   Preferences prefs;
-  if (!prefs.begin(kPrefNamespace, /*readOnly=*/true)) return false;
-  const bool paired = prefs.getBool(kPrefPaired, false);
+  if (!prefs.begin(kPrefNamespace, /*readOnly=*/true)) {
+    // Namespace absent simply means nothing has ever paired.
+    pairedCache = false;
+    pairedCacheValid = true;
+    return false;
+  }
+  pairedCache = prefs.getBool(kPrefPaired, false);
   prefs.end();
-  return paired;
+  pairedCacheValid = true;
+  return pairedCache;
 }
 
 void setVoicePhonePaired(bool paired) {
+  pairedCache = paired;
+  pairedCacheValid = true;
   Preferences prefs;
   if (!prefs.begin(kPrefNamespace, /*readOnly=*/false)) return;
   prefs.putBool(kPrefPaired, paired);
@@ -253,6 +270,7 @@ bool VoiceRelayPeripheral::begin(const char* deviceName) {
     return false;
   }
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  voicePhonePaired();  // warm the cache here rather than from a render path
   // Bonded central only (HomeLab-tdg): pairing with LE Secure Connections, no MITM
   // passkey because the device has no keypad and the phone is the user's own.
   NimBLEDevice::setSecurityAuth(/*bonding=*/true, /*mitm=*/false, /*sc=*/true);
@@ -308,6 +326,8 @@ void VoiceRelayPeripheral::end() {
   s.connected = s.streaming = false;
   LOG_INF("BLE", "voice relay stopped");
 }
+
+bool VoiceRelayPeripheral::isRunning() const { return st().server != nullptr; }
 
 bool VoiceRelayPeripheral::isConnected() const {
   std::lock_guard<std::mutex> lk(st().mtx);
@@ -388,6 +408,13 @@ void VoiceRelayPeripheral::forgetBonds() {
     LOG_ERR("BLE", "forgetBonds before begin(); ignored");
     return;
   }
+  // Clear our own marker: it is what gates pairing, so it must come off even
+  // when the NimBLE store refuses to give up its record. Without this, forgetting
+  // a phone erased the keys but left the device still believing it was paired,
+  // so the very phone the user just forgot was refused on its next connection
+  // with "unbonded central and no pairing window" — the forget button created
+  // the one-sided bond it exists to cure.
+  setVoicePhonePaired(false);
   const int before = NimBLEDevice::getNumBonds();
   NimBLEDevice::deleteAllBonds();
   int left = NimBLEDevice::getNumBonds();
@@ -421,6 +448,7 @@ std::string VoiceRelayPeripheral::linkState() const {
 bool VoiceRelayPeripheral::supported() { return false; }
 bool VoiceRelayPeripheral::begin(const char*) { return false; }
 void VoiceRelayPeripheral::end() {}
+bool VoiceRelayPeripheral::isRunning() const { return false; }
 bool VoiceRelayPeripheral::isConnected() const { return false; }
 bool VoiceRelayPeripheral::isStreaming() const { return false; }
 void VoiceRelayPeripheral::notifyTurnStart() {}

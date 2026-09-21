@@ -26,6 +26,7 @@ class ConnectivityActivity final : public UiTabListActivity {
   ConnectivityActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Tab initialTab = Tab::Bluetooth);
 
   void onEnter() override;
+  void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
 
@@ -68,6 +69,8 @@ class ConnectivityActivity final : public UiTabListActivity {
   // When the user opened the pairing window, so it can be closed again if they
   // put the device down and walk off.
   uint32_t pairingOpenedMs_ = 0;
+  // Whether THIS screen started the peripheral, and so owes it an end().
+  bool startedPeripheral_ = false;
 
   ThemeMetrics metrics_ = {};
   int afterHeader = 0;

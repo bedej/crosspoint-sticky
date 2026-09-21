@@ -32,6 +32,8 @@ constexpr StrId WIFI_ROW_NAME_IDS[] = {StrId::STR_WIFI_NETWORK, StrId::STR_WIFI_
 constexpr uint32_t kPairingWindowMs = 120000;
 
 constexpr uint32_t kNoteMs = 4000;
+// The forget note is an instruction, not a confirmation, so it outlasts the rest.
+constexpr uint32_t kForgetNoteMs = 20000;
 constexpr uint32_t kPollMs = 1000;
 
 }  // namespace
@@ -48,8 +50,25 @@ void ConnectivityActivity::onEnter() {
   afterHeader = metrics_.topPadding + metrics_.headerHeight + metrics_.verticalSpacing;
   bottomReserved = metrics_.buttonHintsHeight + metrics_.verticalSpacing;
 
+  // The voice screen stops the peripheral when it exits, so arriving here from
+  // anywhere else would show a Bluetooth tab with the radio off: no link to
+  // report, and pairing impossible because nothing is advertising. Start it if
+  // nobody else has, and hand it back on the way out.
+  if (VoiceRelayPeripheral::supported() && !VoiceRelayPeripheral::instance().isRunning()) {
+    startedPeripheral_ = VoiceRelayPeripheral::instance().begin("Sticky");
+    LOG_INF("CONN", "started the BLE peripheral for this screen (ok=%d)", (int)startedPeripheral_);
+  }
+
   rebuildRowItems();
   requestUpdate(true);
+}
+
+void ConnectivityActivity::onExit() {
+  if (startedPeripheral_) {
+    VoiceRelayPeripheral::instance().end();
+    startedPeripheral_ = false;
+  }
+  Activity::onExit();
 }
 
 int ConnectivityActivity::listCount() const {
@@ -68,6 +87,12 @@ void ConnectivityActivity::rebuildRowItems() {
     // The first two rows of each tab report state; only the rest do anything.
     item.enabled =
         tab_ == Tab::Bluetooth ? (i >= static_cast<int>(BtRow::Pair)) : (i >= static_cast<int>(WifiRow::Choose));
+    // Nothing to forget when no phone has ever paired, and an implicitly-open
+    // pairing window is exactly that state. Offering the row invites a press
+    // that cannot do anything.
+    if (tab_ == Tab::Bluetooth && static_cast<BtRow>(i) == BtRow::Forget) {
+      item.enabled = VoiceRelayPeripheral::supported() && !VoiceRelayPeripheral::instance().isPairingWindowOpen();
+    }
     rowItems_.push_back(item);
   }
 }
@@ -103,9 +128,13 @@ std::string ConnectivityActivity::btValueText(const int row) const {
       // device has of the half of the link it cannot see.
       return ble.linkState();
     case BtRow::Pair:
-      return ble.isPairingWindowOpen() ? tr(STR_PAIRING_OPEN) : tr(STR_PAIRING_CLOSED);
+      // Imperative, not a state word: every other row's value answers "what is
+      // this", and "Closed" answers a question this row does not ask.
+      return ble.isPairingWindowOpen() ? tr(STR_PAIRING_OPEN) : tr(STR_PAIR_TAP_TO_OPEN);
     case BtRow::Forget:
-      return ble.isBonded() || ble.bondCount() > 0 ? "" : tr(STR_PHONE_NOT_LINKED);
+      // Deliberately blank. bondCount() reaches into the NimBLE host, and this
+      // runs on the render path with the link live.
+      return "";
     default:
       return "";
   }
@@ -145,8 +174,12 @@ void ConnectivityActivity::forgetPhone() {
   VoiceRelayPeripheral::instance().forgetBonds();
   // Say so explicitly: forgetting a phone that is not in the room changes
   // nothing visible, and silence reads as the button having done nothing.
+  // Forgetting is two-sided and the phone's half is not ours to clear: iOS has
+  // no API for it, so a phone that keeps its keys will try to encrypt with a key
+  // this device no longer has, fail silently, and never pair again. Say so, and
+  // leave it up long enough to act on.
   note_ = tr(STR_FORGET_PHONE_DONE);
-  noteUntilMs_ = millis() + kNoteMs;
+  noteUntilMs_ = millis() + kForgetNoteMs;
   requestUpdate();
 }
 

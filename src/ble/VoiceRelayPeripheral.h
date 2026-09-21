@@ -40,6 +40,9 @@ class VoiceRelayPeripheral {
   bool begin(const char* deviceName = "Sticky");
   void end();
 
+  // True once begin() has started the stack. The connectivity menu uses this to
+  // decide whether it has to start the peripheral itself.
+  bool isRunning() const;
   bool isConnected() const;
   // A central has subscribed to audio-up: frames sent before this are dropped.
   bool isStreaming() const;
