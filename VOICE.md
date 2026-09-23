@@ -8,10 +8,12 @@ AI-Voice button ─▶ PDM mic (freeink::Microphone, 16 kHz) ─▶ WebSocket (b
    e-paper  ◀──── answer text (JSON answer.delta, wrapped) ◀──── voice service
 ```
 
-> **Status: compile-verified + on the home menu; not yet flashed/tested on hardware.**
-> Builds clean with `pio run -e sticky` (see BUILD.md for the required PlatformIO Core
-> pin). Launches from the **"Voice Assistant"** home-menu item. No secret is baked into
-> the firmware — the endpoint token is read from the SD card at runtime.
+> **Status: running on hardware.** Push-to-talk, the streamed transcript, multiple
+> conversations, the query rail and BLE-with-Wi-Fi-fallback transport are all flashed
+> and exercised on a Sticky. Builds clean with `pio run -e sticky` (see BUILD.md for
+> the required PlatformIO Core pin). Launches from the **"Voice Assistant"** home-menu
+> item. No secret is baked into the firmware — the endpoint token is read from the SD
+> card at runtime.
 
 ## Configure the device (`/.crosspoint/voice.json`)
 
@@ -47,12 +49,34 @@ writes the *inactive* app slot and reboots, with rollback if the image fails. Or
 CrossPoint's `OtaUpdater` at a URL hosting `firmware.bin`.
 
 ## Use it
-Home menu → **Voice Assistant** → press **Up** to start, speak, press **Up** again to
-stop → the transcript then the streamed answer appear on the e-paper. **Down** exits.
+Home menu → **Voice Assistant** → press **AI-Voice** to start, speak, press it again to
+stop → the transcript, then the streamed answer, appear on the e-paper.
 
-> The Sticky's **AI-Voice button is CrossPoint's Power button**, which the main loop
-> consumes for deep sleep before an activity can see it (default `shortPwrBtn=IGNORE`,
-> `main.cpp`). So push-to-talk is the **Up** side button, not AI-Voice.
+### Controls
+
+| Input | Does |
+|---|---|
+| **AI-Voice** tap | Start / stop listening |
+| **Up** / **Down** | Previous / next page |
+| **Up** held | Back one *turn* |
+| **Down** held | Leave the voice assistant |
+| Tap left / right third | Previous / next page |
+| Tap centre third, or **swipe down from the top** | Voice menu: **Text · Bluetooth · Wi-Fi** |
+| **Swipe in from the right edge** | Query rail — jump between questions in this conversation |
+| **Swipe in from the left edge** | Conversations list |
+| Tap the top bar, left third | Conversations list |
+| Tap the top bar, centre | Start a new conversation |
+| **Swipe up from the bottom** | Home (consumed globally, in every screen) |
+
+The **voice menu is the only on-device route to pairing a phone or choosing a Wi-Fi
+network** — before it was wired to the swipe-down gesture it existed but was reachable
+only over USB with `CMD:CONN`. Leaving it re-flows the conversation *only* if a setting
+that affects the layout actually changed, so checking the Bluetooth tab costs nothing.
+
+> The Sticky wires **AI-Voice and Power to the same GPIO**, and `InputManager` splits
+> them by hold duration — a tap arrives as `Confirm`, a medium hold as `Power`, and a
+> long hold means sleep. Talk therefore accepts both of the first two; binding it to
+> `Power` alone is why the button once appeared dead.
 
 ## Building
 See **BUILD.md** — the key point is you must pin the pioarduino PlatformIO Core `v6.1.19`

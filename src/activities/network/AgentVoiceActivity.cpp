@@ -10,11 +10,10 @@
 #include <esp_system.h>
 
 #include "CrossPointSettings.h"
-#include "SdCardFontSystem.h"
 #include "WifiCredentialStore.h"
 #include "activities/RenderLock.h"
 #include "activities/reader/ReaderUtils.h"
-#include "activities/settings/TextSettingsActivity.h"
+#include "activities/settings/VoiceMenuActivity.h"
 #include "activities/transcript/ConversationPickerActivity.h"
 #include "components/UITheme.h"  // VERIFY include path (drawCenteredWrappedText)
 #include "fontIds.h"             // VERIFY include path (UI_10_FONT_ID)
@@ -432,22 +431,61 @@ void AgentVoiceActivity::stopListening() {
 // Collect a page-turn intent. Priority mirrors the reader: the menu gesture
 // (centre third) is claimed first so it can never double as a page turn, then
 // long-press variants, then a plain turn.
-// Swipe down from the top (or tap the centre third) opens the reader's own text
-// settings, so font size and layout are adjustable from the conversation. The
-// gesture, the menu and the re-flow are all existing machinery — this only
-// wires them together.
-void AgentVoiceActivity::openTextSettings() {
+// Everything TranscriptView::begin() and startParagraph() read out of SETTINGS
+// to lay a conversation out. Change any of these and the existing page index
+// describes a layout that is no longer true; change none of them and a re-flow
+// is pure cost.
+uint32_t AgentVoiceActivity::textLayoutSignature() const {
+  uint32_t h = 2166136261u;  // FNV-1a, enough to notice a change
+  const auto mix = [&h](const uint32_t v) {
+    h = (h ^ (v & 0xff)) * 16777619u;
+    h = (h ^ ((v >> 8) & 0xff)) * 16777619u;
+    h = (h ^ ((v >> 16) & 0xff)) * 16777619u;
+    h = (h ^ ((v >> 24) & 0xff)) * 16777619u;
+  };
+  mix(static_cast<uint32_t>(SETTINGS.getReaderFontId()));
+  // The compression is a float; the raw setting it derives from is the integer.
+  mix(static_cast<uint32_t>(SETTINGS.lineSpacing));
+  mix(static_cast<uint32_t>(SETTINGS.screenMargin));
+  mix(static_cast<uint32_t>(SETTINGS.fontPointSize));
+  mix(static_cast<uint32_t>(SETTINGS.paragraphAlignment));
+  mix(static_cast<uint32_t>(SETTINGS.extraParagraphSpacing));
+  mix(static_cast<uint32_t>(SETTINGS.hyphenationEnabled));
+  mix(static_cast<uint32_t>(SETTINGS.focusReadingEnabled));
+  return h;
+}
+
+// Swipe down from the top (or tap the centre third) opens the voice menu:
+// Text, Bluetooth and Wi-Fi. Until this was wired up the menu existed but was
+// reachable only over USB with CMD:CONN, which is no use to someone holding the
+// device — and the gesture still landed on the old text-settings-only screen.
+//
+// startActivityForResult, not goToVoiceMenu(): the latter REPLACES this
+// activity, which would tear the conversation down to change a font size. This
+// activity stays on the stack, so it also keeps owning the BLE peripheral and
+// the menu's Bluetooth tab finds it already running.
+void AgentVoiceActivity::openVoiceMenu() {
   view_.endTurn();  // never leave a half-laid-out turn behind
   spool_.endAgentTurn();
   view_.clearDraft();
 
-  startActivityForResult(std::make_unique<TextSettingsActivity>(renderer, mappedInput, &sdFontSystem.registry(),
-                                                                TextSettingsActivity::Tab::Size),
-                         [this](const ActivityResult&) {
+  const uint32_t before = textLayoutSignature();
+  LOG_INF("AVA", "voice menu: pushing (sig=%08x)", static_cast<unsigned>(before));
+  startActivityForResult(std::make_unique<VoiceMenuActivity>(renderer, mappedInput, VoiceMenuActivity::Tab::Text),
+                         [this, before](const ActivityResult&) {
                            // RECORD ONLY. This fires while the activity stack is mid-pop, and the
                            // re-flow it used to run here — a blocking render followed by seconds
                            // of SD I/O and layout — panicked the device on exit from Text
                            // Settings. performPendingWork() does it from loop() instead.
+                           LOG_INF("AVA", "voice menu: returned (sig=%08x -> %08x)",
+                                   static_cast<unsigned>(before), static_cast<unsigned>(textLayoutSignature()));
+                           if (textLayoutSignature() == before) {
+                             // Nothing that affects the flow moved. Repaint over the menu and
+                             // leave the page index, the current page and the draft alone.
+                             view_.markFullPaint();
+                             requestUpdate();
+                             return;
+                           }
                            status_ = "Re-flowing the conversation...";
                            view_.setStatus(status_);
                            view_.markFullPaint();
@@ -627,7 +665,7 @@ void AgentVoiceActivity::handlePaging() {
   if (handleTopBarTap()) return;
 
   if (ReaderUtils::isTouchMenuGesture(renderer, mappedInput)) {
-    openTextSettings();
+    openVoiceMenu();
     return;
   }
 
@@ -864,6 +902,12 @@ bool AgentVoiceActivity::handleVoiceButtons() {
 }
 
 void AgentVoiceActivity::loop() {
+  if (menuRequested_) {
+    menuRequested_ = false;
+    LOG_INF("AVA", "serial: opening the voice menu");
+    openVoiceMenu();
+    return;
+  }
   ws_.loop();
   pumpBleAnswers();
   pumpLink();

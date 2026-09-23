@@ -662,6 +662,15 @@ void loop() {
         activityManager.goToVoiceMenu();
       } else if (cmd.startsWith("CONN ")) {
         activityManager.goToVoiceMenu(cmd.substring(5).toInt());
+      } else if (cmd == "VMENU") {
+        AgentVoiceActivity::requestMenu();
+      } else if (cmd == "BACK") {
+        // Dismiss the top activity the way its Back button does, result callback
+        // and all. The Sticky has no Back button and the gesture that stands in
+        // for it cannot be injected, so without this every screen opened by a
+        // CMD: hook was a one-way trip and the RETURN path — which is where the
+        // re-flow and the teardown crash live — could not be tested at all.
+        Activity::finish();
       } else if (cmd == "PTT") {
         AgentVoiceActivity::requestPushToTalk();
       } else if (cmd.startsWith("ASK ")) {

@@ -37,6 +37,10 @@ class AgentVoiceActivity : public Activity {
 
   // Serial "CMD:PTT" (dev/test harness): toggle talk as if Up were pressed.
   static void requestPushToTalk() { pttRequested_ = true; }
+  // Serial "CMD:VMENU": open the voice menu the way the swipe-down gesture
+  // does. CMD:CONN goes through ActivityManager and REPLACES this activity, so
+  // it exercises a different path entirely and cannot regression-test this one.
+  static void requestMenu() { menuRequested_ = true; }
   // Serial test hooks. Touch cannot be automated and ASR needs a room with
   // sound in it, so these are the only way to exercise the transcript view's
   // streaming, paging and power-cycle persistence from the harness. They drive
@@ -81,6 +85,7 @@ class AgentVoiceActivity : public Activity {
 
  private:
   static inline volatile bool pttRequested_ = false;
+  static inline volatile bool menuRequested_ = false;
   static inline std::string injectUser_;
   static inline std::string injectPartial_;
   static inline volatile bool injectPartialPending_ = false;
@@ -128,7 +133,12 @@ class AgentVoiceActivity : public Activity {
   enum class Pending : uint8_t { None, Reflow, Session };
   void performPendingWork();
 
-  void openTextSettings();
+  void openVoiceMenu();
+  // The flow-affecting text settings, rolled into one value. The voice menu is
+  // mostly connectivity now, so most visits change nothing that would re-flow —
+  // and an unconditional re-flow on the way out is seconds of SD I/O for
+  // someone who only wanted to check whether the phone was linked.
+  uint32_t textLayoutSignature() const;
   void openConversations();
   void applyConversationChoice(const std::string& sessionId);  // empty = start a new one
   // Rotate to a fresh conversation when the last one went cold. Checked on
