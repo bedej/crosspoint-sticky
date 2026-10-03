@@ -82,11 +82,35 @@ $P -m pip install -U setuptools wheel
 $P -m pip install -e ~/.platformio/packages/tool-esptoolpy   # editable: resolves
                                                              # to the path the
                                                              # platform checks
+# The platform re-resolves its WHOLE dependency set on every build, so
+# pre-installing esptool alone is not enough — uv still fetches these and fails
+# on the same handshake. Install them with pip first and uv finds nothing to do:
+$P -m pip install -U "pioarduino>=6.1.19" "littlefs-python>=0.16.0" \
+    "fatfs-ng>=0.1.14" "pyyaml>=6.0.2" "rich-click>=1.8.6" "zopfli>=0.2.2" \
+    "intelhex>=2.3.0" "rich>=14.0.0" "cryptography>=45.0.3" "certifi>=2025.8.3" \
+    "ecdsa>=0.19.1" "bitstring>=4.3.1" "reedsolo>=1.5.3,<1.8" \
+    "esp-idf-size>=2.0.0" "esp-coredump>=1.14.0" "pyelftools>=0.32"
+# The authoritative list is `python_deps` in
+# ~/.platformio/platforms/espressif32/builder/penv_setup.py — read it rather
+# than trusting this copy, which ages with the platform version.
+
 # ESP-IDF's own venv, for the CMake step:
 E=~/.platformio/penv/.espidf-5.5.5/bin/python
 $E -m ensurepip && $E -m pip install "cryptography~=44.0.0" "pyparsing>=3.1.0,<4" \
     "idf-component-manager~=2.4.11" "esp-idf-kconfig~=3.7.0"
 ```
+
+The error you get instead of anything useful is just:
+
+```
+Error: Failed to install Python dependencies into penv
+Error: Failed to install Python dependencies (exit code: 2)
+```
+
+The real cause is swallowed — `install_python_deps()` runs uv with stdout and
+stderr to DEVNULL. To see it, run the uv command yourself:
+`~/.platformio/penv/bin/uv pip install --python=~/.platformio/penv/bin/python
+--upgrade <the python_deps list>`.
 
 Symptom if the IDF venv is missing them: `ModuleNotFoundError: No module named
 'idf_component_manager'` from `build.cmake`, which reads like a broken toolchain
