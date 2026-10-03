@@ -15,17 +15,21 @@
 #include "MappedInputManager.h"
 #include "ReaderFontSizes.h"
 #include "SdCardFontSystem.h"
+#include "activities/network/AgentVoiceActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/settings/TextSettingsActivity.h"
 #include "ble/VoiceRelayPeripheral.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
+#include "voice/VoiceBackend.h"
 
 namespace fui = freeink::ui;
 
 namespace {
 
-constexpr StrId TAB_NAME_IDS[] = {StrId::STR_TEXT, StrId::STR_BLUETOOTH, StrId::STR_WIFI};
+constexpr StrId TAB_NAME_IDS[] = {StrId::STR_AGENT, StrId::STR_TEXT, StrId::STR_BLUETOOTH, StrId::STR_WIFI};
+
+constexpr StrId AGENT_ROW_NAME_IDS[] = {StrId::STR_BACKEND, StrId::STR_STATUS, StrId::STR_NEW_CONVERSATION};
 
 constexpr StrId TEXT_ROW_NAME_IDS[] = {StrId::STR_SIZE, StrId::STR_LINE_SPACING, StrId::STR_SCREEN_MARGIN,
                                        StrId::STR_ALL_TEXT_SETTINGS};
@@ -89,6 +93,8 @@ void VoiceMenuActivity::onExit() {
 
 int VoiceMenuActivity::listCount() const {
   switch (tab_) {
+    case Tab::Agent:
+      return static_cast<int>(AgentRow::Count);
     case Tab::Text:
       return static_cast<int>(TextRow::Count);
     case Tab::Bluetooth:
@@ -100,6 +106,8 @@ int VoiceMenuActivity::listCount() const {
 
 const StrId* VoiceMenuActivity::rowNameIds() const {
   switch (tab_) {
+    case Tab::Agent:
+      return AGENT_ROW_NAME_IDS;
     case Tab::Text:
       return TEXT_ROW_NAME_IDS;
     case Tab::Bluetooth:
@@ -118,11 +126,23 @@ void VoiceMenuActivity::rebuildRowItems() {
     fui::ListItem item;
     item.label = I18N.get(rowNameIds()[i]);
     item.actionValue = static_cast<int16_t>(i);
-    // The first two rows of each tab report state; only the rest do anything.
-    // Every Text row does something; the first two rows of the other tabs only
-    // report state.
-    item.enabled = tab_ == Tab::Text || (tab_ == Tab::Bluetooth ? (i >= static_cast<int>(BtRow::Pair))
-                                                                : (i >= static_cast<int>(WifiRow::Choose)));
+    // Rows that only report state are not actionable: the Agent tab's Status,
+    // and the first two rows of Bluetooth and Wi-Fi. Every Text row does
+    // something.
+    switch (tab_) {
+      case Tab::Agent:
+        item.enabled = static_cast<AgentRow>(i) != AgentRow::Status;
+        break;
+      case Tab::Text:
+        item.enabled = true;
+        break;
+      case Tab::Bluetooth:
+        item.enabled = i >= static_cast<int>(BtRow::Pair);
+        break;
+      default:
+        item.enabled = i >= static_cast<int>(WifiRow::Choose);
+        break;
+    }
     // Nothing to forget when no phone has ever paired, and an implicitly-open
     // pairing window is exactly that state. Offering the row invites a press
     // that cannot do anything.
@@ -147,6 +167,56 @@ void VoiceMenuActivity::switchTab(const int direction) {
 void VoiceMenuActivity::onTabAction(const int index) {
   if (index == static_cast<int>(tab_)) return;
   switchTab(index - static_cast<int>(tab_));
+}
+
+std::string VoiceMenuActivity::agentValueText(const int row) const {
+  switch (static_cast<AgentRow>(row)) {
+    case AgentRow::Backend:
+      return voiceBackend() == VoiceBackend::Muse ? tr(STR_MUSE) : tr(STR_HERMES);
+    case AgentRow::Status:
+      // What the SERVER last said about the chosen backend, not what this device
+      // hopes. Unknown is shown as its own thing rather than rounded to Ready:
+      // the server may not report backends at all yet.
+      switch (voiceBackendStatus(voiceBackend())) {
+        case BackendStatus::Ready:
+          return tr(STR_BACKEND_READY);
+        case BackendStatus::Connecting:
+          return tr(STR_BACKEND_CONNECTING);
+        case BackendStatus::Unpaired:
+          return tr(STR_BACKEND_UNPAIRED);
+        case BackendStatus::Error:
+          return tr(STR_BACKEND_OFFLINE);
+        default:
+          return tr(STR_BACKEND_UNKNOWN);
+      }
+    default:
+      return "";
+  }
+}
+
+void VoiceMenuActivity::confirmAgentRow(const int row) {
+  switch (static_cast<AgentRow>(row)) {
+    case AgentRow::Backend: {
+      const VoiceBackend next = voiceBackend() == VoiceBackend::Muse ? VoiceBackend::Hermes : VoiceBackend::Muse;
+      setVoiceBackend(next);
+      // Switching agent starts a new conversation (D6): the thread so far was
+      // addressed to someone else, and carrying it over would ask the new
+      // backend to answer as if it had heard all of it.
+      AgentVoiceActivity::requestNewConversation();
+      requestUpdate();
+      break;
+    }
+    case AgentRow::NewConversation:
+      // A flag the voice activity consumes from its own loop() — never work
+      // done here, where the stack is mid-pop.
+      AgentVoiceActivity::requestNewConversation();
+      note_ = tr(STR_NEW_CONVERSATION_STARTED);
+      noteUntilMs_ = millis() + kNoteMs;
+      requestUpdate();
+      break;
+    default:
+      break;  // Status reports, it does not act
+  }
 }
 
 std::string VoiceMenuActivity::textValueText(const int row) const {
@@ -257,6 +327,8 @@ std::string VoiceMenuActivity::btValueText(const int row) const {
 
 std::string VoiceMenuActivity::valueTextFor(const int row) const {
   switch (tab_) {
+    case Tab::Agent:
+      return agentValueText(row);
     case Tab::Text:
       return textValueText(row);
     case Tab::Bluetooth:
@@ -310,6 +382,10 @@ void VoiceMenuActivity::forgetPhone() {
 }
 
 void VoiceMenuActivity::activateIndex(const int index) {
+  if (tab_ == Tab::Agent) {
+    confirmAgentRow(index);
+    return;
+  }
   if (tab_ == Tab::Text) {
     confirmTextRow(index);
     return;

@@ -27,9 +27,9 @@
 // and Wi-Fi association finishes behind it.
 class VoiceMenuActivity final : public UiTabListActivity {
  public:
-  enum class Tab : uint8_t { Text, Bluetooth, Wifi, Count };
+  enum class Tab : uint8_t { Agent, Text, Bluetooth, Wifi, Count };
 
-  VoiceMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Tab initialTab = Tab::Text);
+  VoiceMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, Tab initialTab = Tab::Agent);
 
   void onEnter() override;
   void onExit() override;
@@ -37,6 +37,7 @@ class VoiceMenuActivity final : public UiTabListActivity {
   void render(RenderLock&&) override;
 
  private:
+  enum class AgentRow : uint8_t { Backend, Status, NewConversation, Count };
   enum class TextRow : uint8_t { Size, LineSpacing, Margin, AllSettings, Count };
   enum class BtRow : uint8_t { Phone, LinkState, Pair, Forget, Count };
   enum class WifiRow : uint8_t { Network, Signal, Choose, Reconnect, Count };
@@ -58,10 +59,12 @@ class VoiceMenuActivity final : public UiTabListActivity {
 
   const StrId* rowNameIds() const;
   std::string valueTextFor(int row) const;
+  std::string agentValueText(int row) const;
   std::string textValueText(int row) const;
   std::string btValueText(int row) const;
   std::string wifiValueText(int row) const;
 
+  void confirmAgentRow(int row);
   void confirmTextRow(int row);
   void openPairingWindow();
   void forgetPhone();

@@ -91,7 +91,7 @@ class ConversationSpool {
   struct Summary {
     std::string id;
     uint16_t turnCount = 0;
-    uint32_t lastEpoch = 0;   // 0 when no turn carries a trustworthy timestamp
+    uint32_t lastEpoch = 0;     // 0 when no turn carries a trustworthy timestamp
     std::string firstQuestion;  // empty when the session has no index yet
   };
   // Session ids are ordinal, so a lexical sort of these is chronological.
@@ -115,6 +115,11 @@ class ConversationSpool {
 
   // --- writing -------------------------------------------------------------
   // A completed user turn (written when ASR finalises).
+  // Which agent a conversation was started against ("hermes"|"muse"), or empty
+  // for conversations written before this was recorded. Static: the picker asks
+  // about sessions it has not opened.
+  static std::string sessionBackend(const std::string& sessionId);
+
   bool appendUserTurn(const std::string& text);
   // One streamed agent chunk. The first chunk after a user turn opens the agent
   // turn; later chunks continue it until endAgentTurn().
@@ -179,12 +184,13 @@ class ConversationSpool {
   std::string indexPath() const;
   bool scan();  // one pass over the file: count turns, find the last turn start
   bool appendRecord(Role role, bool continuation, const std::string& text);
+  // Head-of-file record naming the agent; written once, at session creation.
+  bool writeSessionMeta();
   static void appendJsonEscaped(std::string& out, const std::string& in);
   // Read one raw line starting at `offset`. Returns the offset just past its
   // newline, or 0 on EOF/error.
   uint32_t readLine(uint32_t offset, std::string& line) const;
-  static bool parseRecord(const std::string& line, Role& role, bool& continuation, uint32_t& epoch,
-                          std::string& text);
+  static bool parseRecord(const std::string& line, Role& role, bool& continuation, uint32_t& epoch, std::string& text);
 
   std::string path_;
   std::string sessionId_;

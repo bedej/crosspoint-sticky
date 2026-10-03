@@ -14,8 +14,8 @@
 
 namespace {
 
-constexpr int kEdge = 8;      // outer padding
-constexpr int kChromeGap = 6; // gap under the header rule / above the footer
+constexpr int kEdge = 8;       // outer padding
+constexpr int kChromeGap = 6;  // gap under the header rule / above the footer
 
 CssTextAlign toCssAlign(const uint8_t align) {
   if (align == CrossPointSettings::BOOK_STYLE) return CssTextAlign::Justify;
@@ -97,6 +97,12 @@ void TranscriptView::setListening(const bool listening) {
   if (listening_ == listening) return;
   listening_ = listening;
   fullPaint_ = true;
+}
+
+void TranscriptView::setBackendMark(const char mark) {
+  if (backendMark_ == mark) return;
+  backendMark_ = mark;
+  fullPaint_ = true;  // same as the transport glyph: the status bar changed
 }
 
 void TranscriptView::setTransport(const Transport transport) {
@@ -269,7 +275,7 @@ void TranscriptView::emitLine(Line line) {
 // replay from the spool
 
 uint16_t TranscriptView::layoutTurnText(const Role role, const uint16_t turnIndex, const std::string& text,
-                                       const LineSink& sink) {
+                                        const LineSink& sink) {
   uint16_t produced = 0;
   const auto take = [&](Line line) {
     sink(std::move(line), produced);
@@ -407,8 +413,8 @@ void TranscriptView::restoreIndex() {
   }
   saveIndex();
 
-  LOG_INF("TVIEW", "index ready in %lums: %u lines, %u pages", millis() - started,
-          static_cast<unsigned>(docLine_), static_cast<unsigned>(spool_.pageCount()));
+  LOG_INF("TVIEW", "index ready in %lums: %u lines, %u pages", millis() - started, static_cast<unsigned>(docLine_),
+          static_cast<unsigned>(spool_.pageCount()));
 }
 
 void TranscriptView::loadPage(const size_t page) {
@@ -845,7 +851,19 @@ void TranscriptView::drawHeader() const {
     // something to show.
     top = header_;
   }
-  const int indicatorW = drawLinkIndicator(w - kEdge, kEdge);
+  int indicatorW = drawLinkIndicator(w - kEdge, kEdge);
+
+  // One letter for the agent that will answer, beside the link glyph, so you can
+  // see who you are about to talk to before you talk (HomeLab-cuq). Drawn only
+  // for Muse: Hermes is the default and marking it would put a letter on every
+  // screen to say "normal".
+  if (backendMark_ != '\0') {
+    const char mark[2] = {backendMark_, '\0'};
+    const int markW = renderer_.getTextWidth(UI_10_FONT_ID, mark);
+    const int gap = 4;
+    renderer_.drawText(UI_10_FONT_ID, w - kEdge - indicatorW - gap - markW, kEdge, mark);
+    indicatorW += gap + markW;
+  }
 
   // A filled dot while the mic is live. On a panel with no LED this is the only
   // way to tell capture is running.

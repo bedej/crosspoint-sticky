@@ -62,6 +62,8 @@ class TranscriptView {
   // conversation rather than implying there is only ever one.
   enum class Transport : uint8_t { Wifi, Ble };
   void setTransport(Transport transport);
+  // A single letter beside the link glyph naming the agent, or '\0' for none.
+  void setBackendMark(char mark);
   // Capture state, shown as a filled dot beside the status. Without it there is
   // no way to tell a live mic from a dead one.
   void setListening(bool listening);
@@ -121,7 +123,7 @@ class TranscriptView {
   // Each returns true when the displayed page changed and a repaint is owed.
   bool pagePrev();
   bool pageNext();
-  bool prevTurn();   // long-press back: a conversation turn is the reader's chapter
+  bool prevTurn();  // long-press back: a conversation turn is the reader's chapter
   bool jumpToLatest();
   bool atLatest() const { return curPage_ + 1 >= pageCountOrOne(); }
   // True when text exists past the bottom of the displayed page.
@@ -163,11 +165,11 @@ class TranscriptView {
   using Line = std::shared_ptr<TextBlock>;
 
   void startParagraph();
-  void flushTail();                 // hard flush: emit the held last line too
+  void flushTail();  // hard flush: emit the held last line too
   // `holdTail` keeps a trailing word fragment back for the next delta.
   void feedWords(const char* text, size_t len, bool holdTail);
-  void emitLine(Line line);         // one settled line of the flowed document
-  void loadPage(size_t page);       // re-lay-out `page` from the spool
+  void emitLine(Line line);    // one settled line of the flowed document
+  void loadPage(size_t page);  // re-lay-out `page` from the spool
   // Lay out one whole turn and hand each line to `sink` with its index within
   // the turn. The one place turn text becomes lines on the replay path, shared
   // by page loads and index rebuilds so the two can never drift apart.
@@ -215,6 +217,7 @@ class TranscriptView {
   // chrome
   Link link_ = Link::Offline;
   Transport transport_ = Transport::Wifi;
+  char backendMark_ = '\0';
   bool listening_ = false;
   std::string header_;
   std::string status_;

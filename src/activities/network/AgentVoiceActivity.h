@@ -19,12 +19,11 @@
 #include <vector>
 
 #include "activities/Activity.h"
+#include "activities/transcript/ConversationSpool.h"
+#include "activities/transcript/TranscriptView.h"
 #include "audio/ImaAdpcm.h"
 #include "audio/MicConditioner.h"
 #include "ble/VoiceRelayPeripheral.h"
-
-#include "activities/transcript/ConversationSpool.h"
-#include "activities/transcript/TranscriptView.h"
 
 class AgentVoiceActivity : public Activity {
  public:
@@ -100,9 +99,9 @@ class AgentVoiceActivity : public Activity {
   void pumpInjectedTurns();
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
-  bool loadConfig();  // token/host/port from /.crosspoint/voice.json (SD)
-  void startWifi();   // STA from saved creds — begins, never waits
-  void pumpLink();    // watch the association, open the socket when it is up
+  bool loadConfig();      // token/host/port from /.crosspoint/voice.json (SD)
+  void startWifi();       // STA from saved creds — begins, never waits
+  void pumpLink();        // watch the association, open the socket when it is up
   void pumpBleAnswers();  // drain answer-down JSON the phone wrote
   // Which way this turn travels. Latched when capture starts, because audio
   // buffered for one transport must not be drained down another.
@@ -119,7 +118,7 @@ class AgentVoiceActivity : public Activity {
   void startListening();
   void stopListening();
   void sendTurnEnd();  // however the active transport says "utterance over"
-  void pumpMic();        // read frames -> ws.sendBIN while Listening
+  void pumpMic();      // read frames -> ws.sendBIN while Listening
   void handleMessage(const char* json, size_t len);
   void markDirty();  // throttled requestUpdate()
   // Paging. INHERITED from the reader rather than invented: the tap zones, the
@@ -163,7 +162,7 @@ class AgentVoiceActivity : public Activity {
   freeink::Microphone mic_;
   WebSocketsClient ws_;
   bool wsConnected_ = false;
-  bool wsStarted_ = false;        // ws_.begin() has been called
+  bool wsStarted_ = false;  // ws_.begin() has been called
   unsigned long wifiStartedAt_ = 0;
   static constexpr unsigned long kWifiTimeoutMs = 25000;
   static constexpr unsigned long kWifiRetryMs = 10000;
@@ -201,7 +200,7 @@ class AgentVoiceActivity : public Activity {
   int pagesUntilFullRefresh_ = 1;  // counts down to the next HALF refresh, as the reader's does
   Pending pending_ = Pending::None;
   std::string pendingSessionId_;  // empty with Pending::Session means "start a new one"
-  bool nextIsPageTurn_ = false;  // routes the next repaint through the reader's refresh cycle
+  bool nextIsPageTurn_ = false;   // routes the next repaint through the reader's refresh cycle
 
   std::string status_;      // one-line status/header
   std::string transcript_;  // latest ASR text (partial/final)
@@ -223,6 +222,9 @@ class AgentVoiceActivity : public Activity {
   // transcripts — is invisible from the device.
   MicConditioner conditioner_;
   bool gotTranscript_ = false;
+  // Set when the server reports an error for this turn, so the message it puts
+  // in the status line survives the answer.done that follows a few ms later.
+  bool turnFailed_ = false;
   // An emphasis run that a delta ended part way through: deltas split anywhere,
   // including between the two chars of a '**'.
   char pendingMarker_ = '\0';

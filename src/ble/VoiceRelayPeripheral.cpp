@@ -345,12 +345,28 @@ bool VoiceRelayPeripheral::isStreaming() const {
   return st().streaming;
 }
 
-void VoiceRelayPeripheral::notifyTurnStart() {
+void VoiceRelayPeripheral::notifyTurnStart(const char* backend, const char* conversation) {
   {
     std::lock_guard<std::mutex> lk(st().mtx);
     st().seq = 0;
   }
-  notifyControlJson(R"({"type":"turn","action":"start"})");
+  // The phone forwards these to the voice service, which decides who answers
+  // (HomeLab-cuq). Sent with turn.start rather than as a separate frame: the
+  // phone opens its backend socket on this message, so anything the server must
+  // know before the first audio has to arrive with it.
+  std::string json = R"({"type":"turn","action":"start")";
+  if (backend && *backend) {
+    json += R"(,"backend":")";
+    json += backend;
+    json += '"';
+  }
+  if (conversation && *conversation) {
+    json += R"(,"conversation":")";
+    json += conversation;
+    json += '"';
+  }
+  json += '}';
+  notifyControlJson(json);
 }
 
 void VoiceRelayPeripheral::notifyTurnStop() { notifyControlJson(R"({"type":"turn","action":"stop"})"); }
@@ -457,7 +473,7 @@ void VoiceRelayPeripheral::end() {}
 bool VoiceRelayPeripheral::isRunning() const { return false; }
 bool VoiceRelayPeripheral::isConnected() const { return false; }
 bool VoiceRelayPeripheral::isStreaming() const { return false; }
-void VoiceRelayPeripheral::notifyTurnStart() {}
+void VoiceRelayPeripheral::notifyTurnStart(const char*, const char*) {}
 void VoiceRelayPeripheral::notifyTurnStop() {}
 bool VoiceRelayPeripheral::sendAudioFrame(const uint8_t*, size_t) { return false; }
 bool VoiceRelayPeripheral::popAnswer(std::string&) { return false; }

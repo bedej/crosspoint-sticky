@@ -9,6 +9,8 @@
 #include <algorithm>
 #include <cstdio>
 
+#include "voice/VoiceBackend.h"
+
 namespace {
 constexpr char kSessionDir[] = "/sticky/sessions";
 constexpr char kCurrentPath[] = "/sticky/sessions/current";
@@ -114,6 +116,7 @@ bool ConversationSpool::startNewSession() {
   }
   f.close();
   Storage.writeFile(kCurrentPath, String(sessionId_.c_str()));
+  writeSessionMeta();
 
   open_ = true;
   agentTurnOpen_ = false;
@@ -161,6 +164,49 @@ void ConversationSpool::appendJsonEscaped(std::string& out, const std::string& i
         break;
     }
   }
+}
+
+bool ConversationSpool::writeSessionMeta() {
+  if (!open_) return false;
+  // One metadata line at the head of a conversation, recording which agent it
+  // was started against. Deliberately not a turn: parseRecord rejects it, so it
+  // never reaches the turn table, the page index or the screen. It exists so the
+  // picker can mark a conversation H or M without reading it.
+  std::string line = R"({"r":"m","b":")";
+  line += voiceBackendWireName(voiceBackend());
+  line += "\"}\n";
+
+  HalFile f = Storage.open(path_.c_str(), O_WRITE | O_CREAT | O_APPEND);
+  if (!f) {
+    LOG_ERR("SPOOL", "meta open failed");
+    return false;
+  }
+  const size_t wrote = f.write(reinterpret_cast<const uint8_t*>(line.data()), line.size());
+  f.flush();
+  f.close();
+  if (wrote != line.size()) return false;
+  size_ += wrote;
+  return true;
+}
+
+std::string ConversationSpool::sessionBackend(const std::string& sessionId) {
+  // The metadata line is written at creation, so it is the first record — read
+  // one line rather than the file. A conversation from before this existed has
+  // none, and reads as empty rather than being guessed at.
+  const std::string p = std::string(kSessionDir) + "/" + sessionId + ".jsonl";
+  HalFile f;
+  if (!Storage.openFileForRead("SPOOL", p.c_str(), f) || !f) return "";
+  char buf[128] = {0};
+  const int got = f.read(buf, sizeof(buf) - 1);
+  f.close();
+  if (got <= 0) return "";
+  std::string line(buf, static_cast<size_t>(got));
+  const size_t nl = line.find('\n');
+  if (nl != std::string::npos) line.resize(nl);
+  if (line.find("\"r\":\"m\"") == std::string::npos) return "";
+  JsonDocument doc;
+  if (deserializeJson(doc, line.c_str(), line.size())) return "";
+  return static_cast<const char*>(doc["b"] | "");
 }
 
 bool ConversationSpool::appendRecord(const Role role, const bool continuation, const std::string& text) {
@@ -265,6 +311,12 @@ bool ConversationSpool::parseRecord(const std::string& line, Role& role, bool& c
   JsonDocument doc;
   if (deserializeJson(doc, line.c_str(), line.size())) return false;
   const char* r = doc["r"] | "";
+  // Metadata, not a turn: {"r":"m","b":"muse"} records which agent a
+  // conversation was started against. Returning false keeps it out of the turn
+  // table and the page index, which both skip records they cannot parse — and
+  // matters because the mapping below treats anything that is not 'u' as an
+  // agent turn, so a metadata line would otherwise render as a blank reply.
+  if (r[0] == 'm') return false;
   role = (r[0] == 'u') ? Role::User : Role::Agent;
   continuation = (doc["c"] | 0) != 0;
   text = static_cast<const char*>(doc["x"] | "");

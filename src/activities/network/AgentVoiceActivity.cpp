@@ -18,6 +18,7 @@
 #include "components/UITheme.h"  // VERIFY include path (drawCenteredWrappedText)
 #include "fontIds.h"             // VERIFY include path (UI_10_FONT_ID)
 #include "platform/MicSelftest.h"
+#include "voice/VoiceBackend.h"
 
 // ---- Endpoint config -------------------------------------------------------
 // Read at runtime from /.crosspoint/voice.json on the SD card — NO secret is baked
@@ -84,6 +85,9 @@ void AgentVoiceActivity::updateTransportIndicator() {
   Transport shown = turnTransport_;
   if (shown == Transport::None) shown = chooseTransport();
   view_.setTransport(shown == Transport::Ble ? TranscriptView::Transport::Ble : TranscriptView::Transport::Wifi);
+  // Mark only the non-default agent: a letter on every screen to say "Hermes"
+  // would be chrome rather than information.
+  view_.setBackendMark(voiceBackend() == VoiceBackend::Muse ? 'M' : '\0');
 }
 
 bool AgentVoiceActivity::sendAudio(const int16_t* pcm, const size_t count) {
@@ -372,12 +376,28 @@ void AgentVoiceActivity::startListening() {
   // drained down another half way through an utterance.
   turnTransport_ = chooseTransport();
   updateTransportIndicator();
-  if (turnTransport_ == Transport::Ble) VoiceRelayPeripheral::instance().notifyTurnStart();
+  // Name the agent and the conversation before any audio goes out. The server
+  // treats a later frame as overriding an earlier one, but only frames that
+  // arrive before end-of-utterance count, so this must lead the turn.
+  const char* backendName = voiceBackendWireName(voiceBackend());
+  const std::string& conversationId = spool_.sessionId();
+  if (turnTransport_ == Transport::Ble) {
+    VoiceRelayPeripheral::instance().notifyTurnStart(backendName, conversationId.c_str());
+  } else if (turnTransport_ == Transport::Wifi && wsConnected_) {
+    JsonDocument turn;
+    turn["type"] = "turn";
+    turn["backend"] = backendName;
+    if (!conversationId.empty()) turn["conversation"] = conversationId;
+    std::string out;
+    serializeJson(turn, out);
+    ws_.sendTXT(out.c_str());
+  }
   releasePcmBuffer();  // anything left from a capture that never reached the wire
   pendingEnd_ = false;
   conditioner_.reset();
   encoder_.reset();
   gotTranscript_ = false;
+  turnFailed_ = false;
   pendingMarker_ = '\0';
   pendingCount_ = 0;
   transcript_.clear();
@@ -477,8 +497,8 @@ void AgentVoiceActivity::openVoiceMenu() {
                            // re-flow it used to run here — a blocking render followed by seconds
                            // of SD I/O and layout — panicked the device on exit from Text
                            // Settings. performPendingWork() does it from loop() instead.
-                           LOG_INF("AVA", "voice menu: returned (sig=%08x -> %08x)",
-                                   static_cast<unsigned>(before), static_cast<unsigned>(textLayoutSignature()));
+                           LOG_INF("AVA", "voice menu: returned (sig=%08x -> %08x)", static_cast<unsigned>(before),
+                                   static_cast<unsigned>(textLayoutSignature()));
                            if (textLayoutSignature() == before) {
                              // Nothing that affects the flow moved. Repaint over the menu and
                              // leave the page index, the current page and the draft alone.
@@ -629,7 +649,6 @@ void AgentVoiceActivity::performPendingWork() {
   nextIsPageTurn_ = true;
   requestUpdate();
 }
-
 
 // Checked on ENTRY only, never on a timer: rotating under someone who has just
 // started speaking would lose the turn they are in the middle of, and a
@@ -1010,7 +1029,10 @@ void AgentVoiceActivity::finishAnswer() {
   spool_.endAgentTurn();
   nextIsPageTurn_ = true;
   state_ = State::Idle;
-  status_ = "Power to talk";
+  // An errored turn keeps the server's message: answer.done arrives a few
+  // milliseconds after the error, and resetting here overwrote it before the
+  // panel had finished the refresh that would have shown it.
+  if (!turnFailed_) status_ = "Power to talk";
   dirty_ = false;
   lastRenderMs_ = 0;
   requestUpdate(true);  // one clean full-ish refresh at the end
@@ -1078,6 +1100,19 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
   const char* t = doc["type"] | "";
   LOG_DBG("AVA", "ws rx type=%s len=%u state=%d", t, (unsigned)len, (int)state_);
   lastServerMs_ = millis();  // any server frame keeps the stall watchdog alive
+  if (!strcmp(t, "ready")) {
+    // ready.backends is additive and may be absent: the server that has always
+    // run Hermes may not know about Muse yet. Absent leaves the cached defaults
+    // (Hermes ready, Muse unknown) rather than inventing a status.
+    JsonVariantConst backends = doc["backends"];
+    if (!backends.isNull()) {
+      setVoiceBackendStatus(VoiceBackend::Hermes,
+                            parseBackendStatus(static_cast<const char*>(backends["hermes"] | "")));
+      setVoiceBackendStatus(VoiceBackend::Muse, parseBackendStatus(static_cast<const char*>(backends["muse"] | "")));
+      LOG_INF("AVA", "backends: hermes=%s muse=%s", static_cast<const char*>(backends["hermes"] | "-"),
+              static_cast<const char*>(backends["muse"] | "-"));
+    }
+  }
   if (!strcmp(t, "partial") || !strcmp(t, "transcript")) {
     transcript_ = static_cast<const char*>(doc["text"] | "");
     if (!strcmp(t, "transcript")) {
@@ -1124,7 +1159,12 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     turnTransport_ = Transport::None;
     view_.clearDraft();
     state_ = State::Idle;  // don't strand the user in "Thinking..."
-    status_ = std::string("Error: ") + static_cast<const char*>(doc["message"] | "");
+    // The server writes these to be read by a person ("Muse: not paired"), so
+    // they are shown as they arrive rather than wrapped in a second label that
+    // would read "Error: Muse: not paired".
+    const char* msg = static_cast<const char*>(doc["message"] | "");
+    status_ = *msg ? msg : "Something went wrong";
+    turnFailed_ = true;
     requestUpdate(true);
   }
 }

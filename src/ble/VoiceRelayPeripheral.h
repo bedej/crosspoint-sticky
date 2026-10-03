@@ -48,7 +48,10 @@ class VoiceRelayPeripheral {
   bool isStreaming() const;
 
   // Tell the phone a turn started/ended (it opens and closes the backend socket).
-  void notifyTurnStart();
+  // `backend` ("hermes"|"muse") and `conversation` (the spool session id) ride
+  // with turn.start because the phone opens its backend socket on that message.
+  // Either may be null or empty, and is then simply left out of the JSON.
+  void notifyTurnStart(const char* backend = nullptr, const char* conversation = nullptr);
   void notifyTurnStop();
 
   // Send one encoded audio frame. Adds the ver+seq header; returns false when no

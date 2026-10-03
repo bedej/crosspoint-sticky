@@ -46,6 +46,7 @@
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
+#include "voice/VoiceBackend.h"
 
 GfxRenderer renderer(display);
 MappedInputManager mappedInputManager(gpio, renderer);
@@ -717,6 +718,17 @@ void loop() {
         AgentVoiceActivity::requestSessionList();
       } else if (cmd == "PAGELATEST") {
         AgentVoiceActivity::requestPageMove(2);
+      } else if (cmd.startsWith("BACKEND ")) {
+        // Drives the same call the Agent tab's Backend row makes, so the Muse
+        // path can be exercised without a finger on the panel.
+        const String which = cmd.substring(8);
+        const VoiceBackend next = which == "muse" ? VoiceBackend::Muse : VoiceBackend::Hermes;
+        setVoiceBackend(next);
+        AgentVoiceActivity::requestNewConversation();
+        LOG_INF("MAIN", "backend set to %s", voiceBackendWireName(next));
+      } else if (cmd == "BACKENDSTATE") {
+        LOG_INF("MAIN", "backend=%s status=%d", voiceBackendWireName(voiceBackend()),
+                static_cast<int>(voiceBackendStatus(voiceBackend())));
       } else if (cmd == "BLEFORGET") {
         // Until the phone-link UI exists (HomeLab-jhe), this is the only way to
         // clear a bond the phone no longer has. A device holding one is worse

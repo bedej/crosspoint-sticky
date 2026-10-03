@@ -104,12 +104,23 @@ void ConversationPickerActivity::rebuildRows() {
     char age[24] = {0};
     if (haveClock) formatAge(s.lastEpoch, now, age, sizeof(age));
 
-    char line[64];
+    // Which agent this conversation belongs to, as a single letter (HomeLab-cuq).
+    // Conversations started before the backend was recorded carry no mark rather
+    // than being assumed to be Hermes — they predate the question.
+    const std::string backend = ConversationSpool::sessionBackend(s.id);
+    char mark[8] = {0};
+    if (backend == "muse") {
+      snprintf(mark, sizeof(mark), "M \xc2\xb7 ");
+    } else if (backend == "hermes") {
+      snprintf(mark, sizeof(mark), "H \xc2\xb7 ");
+    }
+
+    char line[72];
     const char* turnWord = s.turnCount == 1 ? "turn" : "turns";
     if (age[0] != '\0') {
-      snprintf(line, sizeof(line), "%u %s \xc2\xb7 %s", static_cast<unsigned>(s.turnCount), turnWord, age);
+      snprintf(line, sizeof(line), "%s%u %s \xc2\xb7 %s", mark, static_cast<unsigned>(s.turnCount), turnWord, age);
     } else {
-      snprintf(line, sizeof(line), "%u %s", static_cast<unsigned>(s.turnCount), turnWord);
+      snprintf(line, sizeof(line), "%s%u %s", mark, static_cast<unsigned>(s.turnCount), turnWord);
     }
     subtitles_.emplace_back(line);
   }
