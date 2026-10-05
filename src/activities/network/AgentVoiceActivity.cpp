@@ -491,7 +491,9 @@ void AgentVoiceActivity::openVoiceMenu() {
 
   const uint32_t before = textLayoutSignature();
   LOG_INF("AVA", "voice menu: pushing (sig=%08x)", static_cast<unsigned>(before));
-  startActivityForResult(std::make_unique<VoiceMenuActivity>(renderer, mappedInput, VoiceMenuActivity::Tab::Text),
+  // Agent, not Text: the first thing someone opens this menu for is which agent
+  // is answering, and whether it is reachable (Bede's call).
+  startActivityForResult(std::make_unique<VoiceMenuActivity>(renderer, mappedInput, VoiceMenuActivity::Tab::Agent),
                          [this, before](const ActivityResult&) {
                            // RECORD ONLY. This fires while the activity stack is mid-pop, and the
                            // re-flow it used to run here — a blocking render followed by seconds
@@ -799,6 +801,25 @@ void AgentVoiceActivity::pumpInjectedTurns() {
     }
   }
 
+  if (openConversationRequested_) {
+    openConversationRequested_ = false;
+    applyConversationChoice(openConversationId_);
+  }
+
+  if (reflowRequested_) {
+    reflowRequested_ = false;
+    // Drives the same thing a font-size change from the menu does: a different
+    // render spec means the stored index is rejected, and restoreIndex() then
+    // rebuilds from offset 0 and saves. That full rebuild is what repairs a
+    // conversation whose index was written against bad offsets.
+    SETTINGS.fontPointSize = reflowPointSize_;
+    SETTINGS.saveToFile();
+    LOG_INF("AVA", "reflow at %u pt", static_cast<unsigned>(reflowPointSize_));
+    view_.begin();
+    view_.restoreIndex();
+    requestUpdate(true);
+  }
+
   if (sessionListRequested_) {
     sessionListRequested_ = false;
     const auto ids = ConversationSpool::listSessionIds();
@@ -806,8 +827,9 @@ void AgentVoiceActivity::pumpInjectedTurns() {
     for (const std::string& id : ids) {
       ConversationSpool::Summary sum;
       ConversationSpool::readSummary(id, sum);
-      LOG_INF("AVA", "  %s: %u turns, epoch %lu, '%s'", id.c_str(), static_cast<unsigned>(sum.turnCount),
-              static_cast<unsigned long>(sum.lastEpoch), sum.firstQuestion.c_str());
+      const std::string backend = ConversationSpool::sessionBackend(id);
+      LOG_INF("AVA", "  %s: %u turns, epoch %lu, backend '%s', '%s'", id.c_str(), static_cast<unsigned>(sum.turnCount),
+              static_cast<unsigned long>(sum.lastEpoch), backend.c_str(), sum.firstQuestion.c_str());
     }
   }
 

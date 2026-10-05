@@ -714,6 +714,10 @@ void loop() {
         } else {
           logSerial.printf("CRASH_REPORT_NONE\n");
         }
+      } else if (cmd.startsWith("OPENCONV ")) {
+        AgentVoiceActivity::requestOpenConversation(std::string(cmd.substring(9).c_str()));
+      } else if (cmd.startsWith("REFLOW ")) {
+        AgentVoiceActivity::requestReflow(static_cast<uint8_t>(cmd.substring(7).toInt()));
       } else if (cmd == "CONVS") {
         AgentVoiceActivity::requestSessionList();
       } else if (cmd == "PAGELATEST") {

@@ -63,6 +63,17 @@ class AgentVoiceActivity : public Activity {
   static void requestRailRow(int row) { railRowRequested_ = row; }
   static void requestNewConversation() { newConversationRequested_ = true; }
   static void requestSessionList() { sessionListRequested_ = true; }
+  // Test hooks for conversation recovery (HomeLab-wni/g7t): open a conversation
+  // by id, and force the full re-flow that a render-spec change triggers, which
+  // is what rebuilds a damaged index.
+  static void requestOpenConversation(const std::string& id) {
+    openConversationId_ = id;
+    openConversationRequested_ = true;
+  }
+  static void requestReflow(uint8_t pointSize) {
+    reflowPointSize_ = pointSize;
+    reflowRequested_ = true;
+  }
   // Opens the real picker, so a screenshot shows the rows as ORDERED and
   // rendered rather than a parallel listing that could disagree with them.
   static void requestPicker() { pickerRequested_ = true; }
@@ -95,6 +106,10 @@ class AgentVoiceActivity : public Activity {
   static inline volatile int railRowRequested_ = -1;
   static inline volatile bool newConversationRequested_ = false;
   static inline volatile bool sessionListRequested_ = false;
+  static inline volatile bool openConversationRequested_ = false;
+  static inline std::string openConversationId_;
+  static inline volatile bool reflowRequested_ = false;
+  static inline volatile uint8_t reflowPointSize_ = 0;
   static inline volatile bool pickerRequested_ = false;
   void pumpInjectedTurns();
   enum class State { Connecting, Idle, Listening, Answering, Error };
