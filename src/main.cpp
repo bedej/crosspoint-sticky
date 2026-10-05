@@ -365,6 +365,11 @@ void setup() {
   // enumeration proceed asynchronously so users do not pay this startup cost.
   delay(250);
 #endif
+  // Room for a whole PUTFONT block: at the BAUD hook's faster rates the default
+  // 256 bytes overflow between two reads of the serial loop.
+#if !LOG_SERIAL_HAS_TX_TIMEOUT
+  logSerial.setRxBufferSize(8192);  // the UART; USB CDC builds have no such limit
+#endif
   Serial.begin(115200);
 #if LOG_SERIAL_HAS_TX_TIMEOUT
   logSerial.setTxTimeoutMs(1);  // This is a load-bearing 1. Do not modify.
