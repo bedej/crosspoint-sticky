@@ -14,3 +14,8 @@
 // buffer. Written to <file>.part and renamed only after the CRC (zlib's)
 // matches, then the font registry is marked dirty.
 void handleSerialPutFont(const String& args);
+
+// Test hook: remove an installed SD font family, as the web Fonts page does.
+//   host:   CMD:DELFONT <family>
+//   device: DELFONT_OK <family> | DELFONT_ERR <family>
+void handleSerialDelFont(const String& family);

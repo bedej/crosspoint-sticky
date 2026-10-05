@@ -736,6 +736,13 @@ void loop() {
         AgentVoiceActivity::requestOpenConversation(std::string(cmd.substring(9).c_str()));
       } else if (cmd.startsWith("PUTFONT ")) {
         handleSerialPutFont(cmd.substring(8));
+      } else if (cmd.startsWith("DELFONT ")) {
+        handleSerialDelFont(cmd.substring(8));
+      } else if (cmd == "SAVESETTINGS") {
+        // Persists what TVFONT set in memory, as picking it in the Text tab would.
+        SETTINGS.saveToFile();
+        LOG_INF("MAIN", "settings saved: conversation font '%s' %u pt", SETTINGS.convFontFamily,
+                static_cast<unsigned>(SETTINGS.convFontPointSize));
       } else if (cmd.startsWith("TVFONT ")) {
         // CMD:TVFONT <family> <pt>
         const String a = cmd.substring(7);

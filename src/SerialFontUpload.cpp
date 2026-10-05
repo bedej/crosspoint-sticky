@@ -123,3 +123,15 @@ void handleSerialPutFont(const String& args) {
   LOG_INF("PUTFONT", "installed %s (%lu bytes)", path, size);
   logSerial.printf("PUTFONT_OK %s\n", path);
 }
+
+void handleSerialDelFont(const String& family) {
+  FontInstaller installer(sdFontSystem.registry());
+  if (installer.deleteFamily(family.c_str()) != FontInstaller::Error::OK) {
+    logSerial.printf("DELFONT_ERR %s\n", family.c_str());
+    LOG_ERR("DELFONT", "failed: %s", family.c_str());
+    return;
+  }
+  sdFontSystem.markRegistryDirty();
+  LOG_INF("DELFONT", "removed %s", family.c_str());
+  logSerial.printf("DELFONT_OK %s\n", family.c_str());
+}
