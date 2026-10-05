@@ -31,8 +31,26 @@ constexpr StrId TAB_NAME_IDS[] = {StrId::STR_AGENT, StrId::STR_TEXT, StrId::STR_
 
 constexpr StrId AGENT_ROW_NAME_IDS[] = {StrId::STR_BACKEND, StrId::STR_STATUS, StrId::STR_NEW_CONVERSATION};
 
-constexpr StrId TEXT_ROW_NAME_IDS[] = {StrId::STR_SIZE, StrId::STR_LINE_SPACING, StrId::STR_SCREEN_MARGIN,
-                                       StrId::STR_ALL_TEXT_SETTINGS};
+constexpr StrId TEXT_ROW_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_LINE_SPACING,
+                                       StrId::STR_SCREEN_MARGIN, StrId::STR_ALL_TEXT_SETTINGS};
+
+// The conversation font choices: the reader's, the two built-in faces, then
+// every installed SD family. The stored value for each is what
+// CrossPointSettings::convFontFamily expects.
+struct ConvFontChoice {
+  std::string label;
+  std::string value;
+};
+std::vector<ConvFontChoice> convFontChoices() {
+  std::vector<ConvFontChoice> out;
+  const auto& families = sdFontSystem.registry().getFamilies();
+  out.reserve(3 + families.size());
+  out.push_back({tr(STR_SAME_AS_READER), ""});
+  out.push_back({"Noto Sans", "builtin-sans"});
+  out.push_back({"Noto Serif", "builtin-serif"});
+  for (const auto& f : families) out.push_back({f.name, f.name});
+  return out;
+}
 
 constexpr StrId LINE_SPACING_IDS[] = {StrId::STR_TIGHT, StrId::STR_NORMAL, StrId::STR_WIDE, StrId::STR_EXTRA_WIDE};
 
@@ -223,13 +241,20 @@ void VoiceMenuActivity::confirmAgentRow(const int row) {
 
 std::string VoiceMenuActivity::textValueText(const int row) const {
   switch (static_cast<TextRow>(row)) {
+    case TextRow::Font: {
+      for (const auto& c : convFontChoices()) {
+        if (c.value == SETTINGS.convFontFamily) return c.label;
+      }
+      return SETTINGS.convFontFamily;
+    }
     case TextRow::Size: {
-      const std::vector<uint8_t> points = readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.sdFontFamilyName);
+      const std::vector<uint8_t> points =
+          readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.conversationSdFamily());
       char buf[12];
       // "pt" is the typographic unit symbol, written the same way in every
       // language CrossPoint ships — same reasoning as the reader's size list.
       snprintf(buf, sizeof(buf), "%u pt",
-               static_cast<unsigned>(snapToNearestPointSize(points, SETTINGS.fontPointSize)));
+               static_cast<unsigned>(snapToNearestPointSize(points, SETTINGS.conversationPointSize())));
       return buf;
     }
     case TextRow::LineSpacing: {
@@ -245,19 +270,39 @@ std::string VoiceMenuActivity::textValueText(const int row) const {
 
 void VoiceMenuActivity::confirmTextRow(const int row) {
   switch (static_cast<TextRow>(row)) {
+    case TextRow::Font: {
+      const std::vector<ConvFontChoice> choices = convFontChoices();
+      std::vector<std::string> options;
+      options.reserve(choices.size());
+      int cur = 0;
+      for (const auto& c : choices) {
+        if (c.value == SETTINGS.convFontFamily) cur = static_cast<int>(options.size());
+        options.push_back(c.label);
+      }
+      optionPopup_.show(StrId::STR_FONT, options, cur, [choices](int idx) {
+        if (idx < 0 || idx >= static_cast<int>(choices.size())) return;
+        strncpy(SETTINGS.convFontFamily, choices[static_cast<size_t>(idx)].value.c_str(),
+                sizeof(SETTINGS.convFontFamily) - 1);
+        SETTINGS.convFontFamily[sizeof(SETTINGS.convFontFamily) - 1] = '\0';
+        SETTINGS.saveToFile();
+      });
+      requestUpdate();
+      break;
+    }
     case TextRow::Size: {
-      const std::vector<uint8_t> points = readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.sdFontFamilyName);
+      const std::vector<uint8_t> points =
+          readerFontPointSizes(&sdFontSystem.registry(), SETTINGS.conversationSdFamily());
       std::vector<std::string> options;
       options.reserve(points.size());
       int cur = 0;
-      const uint8_t selected = snapToNearestPointSize(points, SETTINGS.fontPointSize);
+      const uint8_t selected = snapToNearestPointSize(points, SETTINGS.conversationPointSize());
       for (const uint8_t pt : points) {
         if (pt == selected) cur = static_cast<int>(options.size());
         options.push_back(std::to_string(pt) + " pt");
       }
       optionPopup_.show(StrId::STR_SIZE, options, cur, [points](int idx) {
         if (idx < 0 || idx >= static_cast<int>(points.size())) return;
-        SETTINGS.fontPointSize = points[static_cast<size_t>(idx)];
+        SETTINGS.convFontPointSize = points[static_cast<size_t>(idx)];
         SETTINGS.saveToFile();
       });
       requestUpdate();

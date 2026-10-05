@@ -78,9 +78,13 @@ class ConversationSpool {
     uint16_t viewportWidth = 0;
     uint16_t linesPerPage = 0;
     uint8_t fontPointSize = 0;
+    // Turn gap as a percentage of a line, and how a user turn is set apart:
+    // both move page breaks, so both invalidate the index.
+    uint8_t gapPct = 0;
+    uint8_t cue = 0;
     bool operator==(const RenderSpec& o) const {
       return fontId == o.fontId && viewportWidth == o.viewportWidth && linesPerPage == o.linesPerPage &&
-             fontPointSize == o.fontPointSize;
+             fontPointSize == o.fontPointSize && gapPct == o.gapPct && cue == o.cue;
     }
     bool operator!=(const RenderSpec& o) const { return !(*this == o); }
   };
@@ -171,6 +175,7 @@ class ConversationSpool {
     uint32_t spoolOffset = 0;  // START record of the first unindexed turn
     uint16_t turnIndex = 0;    // its index
     uint32_t docLine = 0;      // settled lines in the document before it
+    uint16_t pageUsed = 0;     // body pixels already used on the last page
   };
 
   // The page index is derived data written beside the spool. Losing it costs

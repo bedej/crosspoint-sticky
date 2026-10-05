@@ -96,6 +96,8 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   if (sdFontFamilyName[0] != '\0') {
     doc["sdFontFamilyName"] = sdFontFamilyName;
   }
+  if (convFontFamily[0] != '\0') doc["convFontFamily"] = convFontFamily;
+  if (convFontPointSize != 0) doc["convFontPointSize"] = convFontPointSize;
   // Dictionary folder name — uses dynamic getter/setter in SettingsList, save manually
   if (dictionaryName[0] != '\0') {
     doc["dictionaryName"] = dictionaryName;
@@ -209,6 +211,10 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   const uint8_t storedFontFamily = doc["fontFamily"] | (uint8_t)0;
   fontFamily = clamp(storedFontFamily, BUILTIN_FONT_COUNT, 0);
   // SD card font family name — not in SettingsList, load manually
+  const char* cff = doc["convFontFamily"] | "";
+  strncpy(convFontFamily, cff, sizeof(convFontFamily) - 1);
+  convFontFamily[sizeof(convFontFamily) - 1] = '\0';
+  convFontPointSize = doc["convFontPointSize"] | (uint8_t)0;
   const char* sfn = doc["sdFontFamilyName"] | "";
   strncpy(sdFontFamilyName, sfn, sizeof(sdFontFamilyName) - 1);
   sdFontFamilyName[sizeof(sdFontFamilyName) - 1] = '\0';
@@ -276,49 +282,88 @@ ReaderRenderSpec CrossPointSettings::readerRenderSpec(const uint16_t viewportWid
   return spec;
 }
 
-float CrossPointSettings::getReaderLineCompression() const {
-  // SD card fonts use same compression as Bookerly (the most neutral values)
-  if (sdFontFamilyName[0] != '\0') {
-    switch (lineSpacing) {
-      case TIGHT:
-        return 0.95f;
-      case NORMAL:
-      default:
-        return 1.0f;
-      case WIDE:
-        return 1.1f;
-      case EXTRA_WIDE:
-        return 1.2f;
-    }
-  }
+namespace {
+enum class FaceKind : uint8_t { Sd, Serif, Sans };
 
-  switch (fontFamily) {
-    case NOTOSERIF:
+float lineCompressionFor(const FaceKind kind, const uint8_t lineSpacing) {
+  // SD card fonts use same compression as Bookerly (the most neutral values)
+  switch (kind) {
+    case FaceKind::Sd:
+    case FaceKind::Serif:
     default:
       switch (lineSpacing) {
-        case TIGHT:
+        case CrossPointSettings::TIGHT:
           return 0.95f;
-        case NORMAL:
+        case CrossPointSettings::NORMAL:
         default:
           return 1.0f;
-        case WIDE:
+        case CrossPointSettings::WIDE:
           return 1.1f;
-        case EXTRA_WIDE:
+        case CrossPointSettings::EXTRA_WIDE:
           return 1.2f;
       }
-    case NOTOSANS:
+    case FaceKind::Sans:
       switch (lineSpacing) {
-        case TIGHT:
+        case CrossPointSettings::TIGHT:
           return 0.90f;
-        case NORMAL:
+        case CrossPointSettings::NORMAL:
         default:
           return 0.95f;
-        case WIDE:
+        case CrossPointSettings::WIDE:
           return 1.0f;
-        case EXTRA_WIDE:
+        case CrossPointSettings::EXTRA_WIDE:
           return 1.05f;
       }
   }
+}
+
+int builtinFontId(const bool sans, const uint8_t pointSize) {
+  const uint8_t pt =
+      snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES), pointSize);
+  switch (pt) {
+    case 12:
+      return sans ? NOTOSANS_12_FONT_ID : NOTOSERIF_12_FONT_ID;
+    case 16:
+      return sans ? NOTOSANS_16_FONT_ID : NOTOSERIF_16_FONT_ID;
+    case 18:
+      return sans ? NOTOSANS_18_FONT_ID : NOTOSERIF_18_FONT_ID;
+    case 14:
+    default:
+      return sans ? NOTOSANS_14_FONT_ID : NOTOSERIF_14_FONT_ID;
+  }
+}
+}  // namespace
+
+float CrossPointSettings::getReaderLineCompression() const {
+  if (sdFontFamilyName[0] != '\0') return lineCompressionFor(FaceKind::Sd, lineSpacing);
+  return lineCompressionFor(fontFamily == NOTOSANS ? FaceKind::Sans : FaceKind::Serif, lineSpacing);
+}
+
+const char* CrossPointSettings::conversationSdFamily() const {
+  if (convFontFamily[0] == '\0') return sdFontFamilyName;
+  if (strncmp(convFontFamily, "builtin-", 8) == 0) return "";
+  return convFontFamily;
+}
+
+int CrossPointSettings::getConversationFontId() const {
+  const char* sd = conversationSdFamily();
+  const uint8_t pt = conversationPointSize();
+  if (sd[0] != '\0' && sdFontIdResolver) {
+    const int id = sdFontIdResolver(sdFontResolverCtx, sd, pt);
+    if (id != 0) return id;
+  }
+  // A built-in face: the one named, else (following the reader, or an SD
+  // family that is not resident) the reader's built-in choice.
+  const bool named = strncmp(convFontFamily, "builtin-", 8) == 0;
+  const bool sans = named ? strcmp(convFontFamily, "builtin-sans") == 0 : fontFamily == NOTOSANS;
+  return builtinFontId(sans, pt);
+}
+
+float CrossPointSettings::getConversationLineCompression() const {
+  if (conversationSdFamily()[0] != '\0') return lineCompressionFor(FaceKind::Sd, lineSpacing);
+  const bool named = strncmp(convFontFamily, "builtin-", 8) == 0;
+  const bool sans = named ? strcmp(convFontFamily, "builtin-sans") == 0 : fontFamily == NOTOSANS;
+  return lineCompressionFor(sans ? FaceKind::Sans : FaceKind::Serif, lineSpacing);
 }
 
 unsigned long CrossPointSettings::getSleepTimeoutMs() const {
@@ -363,22 +408,7 @@ int CrossPointSettings::getReaderFontId() const {
     // Fall through to built-in if SD font not found
   }
 
-  // A built-in family only exists at BUILTIN_READER_POINT_SIZES, so a size
-  // carried over from an SD family may not be one of them. ensureLoaded()
-  // normally persists the snap; snap again here (without allocating — this runs
-  // in the page render loop) so rendering is correct even before it has run.
-  const uint8_t pt =
-      snapToNearestPointSize(BUILTIN_READER_POINT_SIZES, std::size(BUILTIN_READER_POINT_SIZES), fontPointSize);
-  const bool sans = (fontFamily == NOTOSANS);
-  switch (pt) {
-    case 12:
-      return sans ? NOTOSANS_12_FONT_ID : NOTOSERIF_12_FONT_ID;
-    case 16:
-      return sans ? NOTOSANS_16_FONT_ID : NOTOSERIF_16_FONT_ID;
-    case 18:
-      return sans ? NOTOSANS_18_FONT_ID : NOTOSERIF_18_FONT_ID;
-    case 14:
-    default:
-      return sans ? NOTOSANS_14_FONT_ID : NOTOSERIF_14_FONT_ID;
-  }
+  // A built-in family only exists at BUILTIN_READER_POINT_SIZES; builtinFontId()
+  // snaps without allocating, since this runs in the page render loop.
+  return builtinFontId(fontFamily == NOTOSANS, fontPointSize);
 }

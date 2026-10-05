@@ -82,13 +82,29 @@ class AgentVoiceActivity : public Activity {
     reflowPointSize_ = pointSize;
     reflowRequested_ = true;
   }
+  // Layout-study hooks (sticky-harness/fontsweep.py). Font: "builtin-serif",
+  // "builtin-sans" or an installed SD family; applied in loop() like a reflow,
+  // and not saved, so the study leaves the user's settings alone.
+  static void requestFont(const std::string& family, uint8_t pointSize) {
+    fontFamily_ = family;
+    fontPointSize_ = pointSize;
+    fontRequested_ = true;
+  }
+  static void requestTurnStyle(uint8_t gapPct, uint8_t cue) {
+    styleGapPct_ = gapPct;
+    styleCue_ = cue;
+    styleRequested_ = true;
+  }
+  // Hold the device awake for an unattended run: if it sleeps, the CH343
+  // bridge loses power and the serial port disappears until someone presses power.
+  static void setKeepAwake(bool on) { keepAwake_ = on; }
   // Opens the real picker, so a screenshot shows the rows as ORDERED and
   // rendered rather than a parallel listing that could disagree with them.
   static void requestPicker() { pickerRequested_ = true; }
   void render(RenderLock&&) override;
 
   // Keep the device awake and the loop hot while a conversation is live.
-  bool preventAutoSleep() override { return state_ != State::Idle && state_ != State::Error; }
+  bool preventAutoSleep() override { return keepAwake_ || (state_ != State::Idle && state_ != State::Error); }
   bool skipLoopDelay() override { return wsConnected_; }
   // The AI-Voice button is push-to-talk here, and on this board it is the same
   // GPIO as power/wake. The stock 400 ms hold-to-sleep is shorter than a
@@ -119,8 +135,17 @@ class AgentVoiceActivity : public Activity {
   static inline std::string openConversationId_;
   static inline volatile bool reflowRequested_ = false;
   static inline volatile uint8_t reflowPointSize_ = 0;
+  static inline std::string fontFamily_;
+  static inline volatile uint8_t fontPointSize_ = 0;
+  static inline volatile bool fontRequested_ = false;
+  static inline volatile bool keepAwake_ = false;
+  static inline volatile uint8_t styleGapPct_ = 67;
+  static inline volatile uint8_t styleCue_ = 0;
+  static inline volatile bool styleRequested_ = false;
   static inline volatile bool pickerRequested_ = false;
   void pumpInjectedTurns();
+  // The conversation font is the screen's own: make it resident, then lay out.
+  void beginView();
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
   bool loadConfig();      // token/host/port from /.crosspoint/voice.json (SD)

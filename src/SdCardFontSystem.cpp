@@ -134,6 +134,32 @@ void SdCardFontSystem::ensureLoaded(GfxRenderer& renderer) {
   }
 }
 
+void SdCardFontSystem::ensureLoadedFor(GfxRenderer& renderer, const char* family, const uint8_t pointSize) {
+  const bool registryWasDirty = registryDirty_.exchange(false, std::memory_order_acquire);
+  if (registryWasDirty) registry_.discover();
+
+  if (family == nullptr || family[0] == '\0') {
+    if (!manager_.currentFamilyName().empty()) manager_.unloadAll(renderer);
+    return;
+  }
+  const auto* info = registry_.findFamily(family);
+  if (!info) {
+    LOG_ERR("SDFS", "SD font family not found: %s", family);
+    if (!manager_.currentFamilyName().empty()) manager_.unloadAll(renderer);
+    return;
+  }
+  const auto* selected = info->findNearestSize(pointSize);
+  const uint8_t wantedPt = selected ? selected->pointSize : 0;
+  if (!registryWasDirty && manager_.currentFamilyName() == family && manager_.currentPointSize() == wantedPt) return;
+  if (!manager_.currentFamilyName().empty()) manager_.unloadAll(renderer);
+  if (manager_.loadFamily(*info, renderer, pointSize)) {
+    setupUiFallbacks(renderer);
+    LOG_DBG("SDFS", "Loaded %s at %u pt for its own screen", family, manager_.currentPointSize());
+  } else {
+    LOG_ERR("SDFS", "Failed to load SD font family: %s", family);
+  }
+}
+
 void SdCardFontSystem::setupUiFallbacks(GfxRenderer& renderer) {
   const std::string& familyName = manager_.currentFamilyName();
   if (familyName.empty()) return;  // no SD family loaded — nothing to fall back to

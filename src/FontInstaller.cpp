@@ -144,6 +144,11 @@ FontInstaller::Error FontInstaller::deleteFamily(const char* familyName) {
     SETTINGS.clearSdFontFamily();
     LOG_DBG("FONT", "Cleared active SD font (deleted family: %s)", familyName);
   }
+  if (strcmp(SETTINGS.convFontFamily, familyName) == 0) {
+    SETTINGS.convFontFamily[0] = '\0';
+    SETTINGS.saveToFile();
+    LOG_DBG("FONT", "Conversation font back to the reader's (deleted family: %s)", familyName);
+  }
 
   return Error::OK;
 }

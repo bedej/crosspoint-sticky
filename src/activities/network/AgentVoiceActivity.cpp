@@ -10,6 +10,7 @@
 #include <esp_system.h>
 
 #include "CrossPointSettings.h"
+#include "SdCardFontSystem.h"
 #include "WifiCredentialStore.h"
 #include "activities/RenderLock.h"
 #include "activities/reader/ReaderUtils.h"
@@ -305,7 +306,7 @@ void AgentVoiceActivity::onEnter() {
   // The spool is the conversation. Deep sleep wakes through a reset, so the
   // page index is gone even though the text is not — rebuild it from the raw
   // records and land on the latest page.
-  view_.begin();
+  beginView();
   pagesUntilFullRefresh_ = SETTINGS.getRefreshFrequency();
   if (spool_.begin()) {
     maybeRotateSession();
@@ -464,6 +465,11 @@ void AgentVoiceActivity::stopListening() {
 // to lay a conversation out. Change any of these and the existing page index
 // describes a layout that is no longer true; change none of them and a re-flow
 // is pure cost.
+void AgentVoiceActivity::beginView() {
+  sdFontSystem.ensureLoadedFor(renderer, SETTINGS.conversationSdFamily(), SETTINGS.conversationPointSize());
+  view_.begin();
+}
+
 uint32_t AgentVoiceActivity::textLayoutSignature() const {
   uint32_t h = 2166136261u;  // FNV-1a, enough to notice a change
   const auto mix = [&h](const uint32_t v) {
@@ -472,7 +478,12 @@ uint32_t AgentVoiceActivity::textLayoutSignature() const {
     h = (h ^ ((v >> 16) & 0xff)) * 16777619u;
     h = (h ^ ((v >> 24) & 0xff)) * 16777619u;
   };
-  mix(static_cast<uint32_t>(SETTINGS.getReaderFontId()));
+  // The family by name: a newly chosen SD family is not resident yet, so its
+  // font id would not change until after the re-flow this is meant to trigger.
+  for (const char* p = SETTINGS.convFontFamily; *p; ++p) mix(static_cast<uint8_t>(*p));
+  for (const char* p = SETTINGS.sdFontFamilyName; *p; ++p) mix(static_cast<uint8_t>(*p));
+  mix(static_cast<uint32_t>(SETTINGS.fontFamily));
+  mix(static_cast<uint32_t>(SETTINGS.convFontPointSize));
   // The compression is a float; the raw setting it derives from is the integer.
   mix(static_cast<uint32_t>(SETTINGS.lineSpacing));
   mix(static_cast<uint32_t>(SETTINGS.screenMargin));
@@ -679,7 +690,7 @@ void AgentVoiceActivity::performPendingWork() {
 
   // A new RenderSpec drops the page index and rejects the persisted one; the
   // spool is raw text and is untouched either way.
-  view_.begin();
+  beginView();
   view_.restoreIndex();
   // Set the letter outright rather than clearing it and waiting for the next
   // poll to notice: begin() resets the view's status-bar state, and the
@@ -894,11 +905,38 @@ void AgentVoiceActivity::pumpInjectedTurns() {
     // render spec means the stored index is rejected, and restoreIndex() then
     // rebuilds from offset 0 and saves. That full rebuild is what repairs a
     // conversation whose index was written against bad offsets.
-    SETTINGS.fontPointSize = reflowPointSize_;
+    SETTINGS.convFontPointSize = reflowPointSize_;
     SETTINGS.saveToFile();
     LOG_INF("AVA", "reflow at %u pt", static_cast<unsigned>(reflowPointSize_));
-    view_.begin();
+    beginView();
     view_.restoreIndex();
+    requestUpdate(true);
+  }
+
+  if (styleRequested_) {
+    styleRequested_ = false;
+    TranscriptView::setTurnStyle(styleGapPct_, static_cast<TranscriptView::Cue>(styleCue_));
+    beginView();
+    view_.restoreIndex();
+    view_.showPage(0);
+    requestUpdate(true);
+  }
+
+  if (fontRequested_) {
+    fontRequested_ = false;
+    // The conversation's own font, in memory only: the study leaves the saved
+    // settings, and the reader's font, alone.
+    strncpy(SETTINGS.convFontFamily, fontFamily_.c_str(), sizeof(SETTINGS.convFontFamily) - 1);
+    SETTINGS.convFontFamily[sizeof(SETTINGS.convFontFamily) - 1] = '\0';
+    SETTINGS.convFontPointSize = fontPointSize_;
+    beginView();
+    LOG_INF("AVA", "TVFONT applied family='%s' sd='%s' pt=%u fontId=%d", SETTINGS.convFontFamily,
+            SETTINGS.conversationSdFamily(), static_cast<unsigned>(SETTINGS.convFontPointSize),
+            SETTINGS.getConversationFontId());
+    view_.restoreIndex();
+    // restoreIndex() leaves no page loaded; show the first, so every shot of
+    // the study is the same page of the same conversation.
+    view_.showPage(0);
     requestUpdate(true);
   }
 

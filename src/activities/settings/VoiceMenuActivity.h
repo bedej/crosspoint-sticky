@@ -38,7 +38,8 @@ class VoiceMenuActivity final : public UiTabListActivity {
 
  private:
   enum class AgentRow : uint8_t { Backend, Status, NewConversation, Count };
-  enum class TextRow : uint8_t { Size, LineSpacing, Margin, AllSettings, Count };
+  // Font and Size are the conversation's own; the rest are shared with the reader.
+  enum class TextRow : uint8_t { Font, Size, LineSpacing, Margin, AllSettings, Count };
   enum class BtRow : uint8_t { Phone, LinkState, Pair, Forget, Count };
   enum class WifiRow : uint8_t { Network, Signal, Choose, Reconnect, Count };
 

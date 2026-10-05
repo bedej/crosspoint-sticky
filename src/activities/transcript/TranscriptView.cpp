@@ -25,6 +25,14 @@ CssTextAlign toCssAlign(const uint8_t align) {
 // The user's turn is the ASR transcript, so it is marked as quoted material
 // rather than left to look like something the agent said.
 constexpr char kUserMarker[] = ">";
+constexpr char kHangMarker[] = "> ";
+// Cue::Label. Study-only: a shipped label goes through tr().
+constexpr char kUserLabel[] = "You:";
+// Cue::Box: padding between the hairline and the text.
+constexpr int kBoxPad = 8;
+// Cue::Bar: the rule down the left of a user turn, and the space after it.
+constexpr int kBarW = 3;
+constexpr int kBarGap = 9;
 
 // Query rail geometry. Wide enough that a whole question sits on ONE line and
 // is not ellipsised either — wrapping made the rail hard to scan, and truncating
@@ -41,12 +49,12 @@ constexpr int kRailOrdinal = 18;
 // geometry
 
 void TranscriptView::begin() {
-  fontId_ = SETTINGS.getReaderFontId();
+  fontId_ = SETTINGS.getConversationFontId();
   if (fontId_ == 0) {
-    LOG_ERR("TVIEW", "no reader font");
+    LOG_ERR("TVIEW", "no conversation font");
     return;
   }
-  const float compression = SETTINGS.getReaderLineCompression();
+  const float compression = SETTINGS.getConversationLineCompression();
   lineAdvance_ = std::max(1, renderer_.getLineHeight(fontId_, compression));
   uiLineH_ = std::max(1, renderer_.getLineHeight(UI_10_FONT_ID));
 
@@ -62,22 +70,27 @@ void TranscriptView::begin() {
   // The bottom bar is the reader's, so reserve exactly what it occupies rather
   // than a guess at one text line.
   footerTop_ = screenH - UITheme::getStatusBarHeight();
-  const int bodyHeight = (footerTop_ - kChromeGap) - bodyTop_;
-  linesPerPage_ = static_cast<uint16_t>(std::max(0, bodyHeight / lineAdvance_));
+  bodyHeight_ = std::max(0, (footerTop_ - kChromeGap) - bodyTop_);
+  linesPerPage_ = static_cast<uint16_t>(bodyHeight_ / lineAdvance_);
+  gapPx_ = (lineAdvance_ * gapPct_ + 50) / 100;
 
-  const ConversationSpool::RenderSpec spec{fontId_, static_cast<uint16_t>(std::max(0, textWidth_)), linesPerPage_,
-                                           SETTINGS.fontPointSize};
+  const ConversationSpool::RenderSpec spec{fontId_,       static_cast<uint16_t>(std::max(0, textWidth_)),
+                                           linesPerPage_, SETTINGS.conversationPointSize(),
+                                           gapPct_,       static_cast<uint8_t>(cue_)};
   if (spool_.applySpec(spec)) {
     // Geometry changed: the page index described a different layout, so it is
     // gone. The spool itself is untouched — pages are rebuilt from raw text.
     LOG_INF("TVIEW", "render spec changed, page index rebuilt");
     lines_.clear();
+    lineInfo_.clear();
+    shownUsed_ = 0;
     docLine_ = 0;
     curPage_ = 0;
     livePage_ = 0;
+    pageUsed_ = 0;
   }
-  LOG_INF("TVIEW", "%dx%d font=%d adv=%d lines/page=%u", screenW, screenH, fontId_, lineAdvance_,
-          static_cast<unsigned>(linesPerPage_));
+  LOG_INF("TVIEW", "%dx%d font=%d adv=%d gap=%d (%u%%) cue=%s body=%d", screenW, screenH, fontId_, lineAdvance_, gapPx_,
+          static_cast<unsigned>(gapPct_), cueName(cue_), bodyHeight_);
   fullPaint_ = true;
 }
 
@@ -119,21 +132,77 @@ void TranscriptView::setStatus(const std::string& text) {
   fullPaint_ = true;
 }
 
-EpdFontFamily::Style TranscriptView::styleFor(const Role role) const {
+const char* TranscriptView::cueName(const Cue cue) {
+  switch (cue) {
+    case Cue::Prefix:
+      return "prefix";
+    case Cue::Bold:
+      return "bold";
+    case Cue::BoldPrefix:
+      return "boldprefix";
+    case Cue::Bar:
+      return "bar";
+    case Cue::BarBold:
+      return "barbold";
+    case Cue::Right:
+      return "right";
+    case Cue::Rule:
+      return "rule";
+    case Cue::Hang:
+      return "hang";
+    case Cue::Label:
+      return "label";
+    case Cue::Box:
+      return "box";
+    default:
+      return "?";
+  }
+}
+
+EpdFontFamily::Style TranscriptView::styleFor(const Role role, const bool draft) const {
   // Real faces with their own kerning and ligature tables, not a synthesised
   // slant: bits 0-1 of EpdFontFamily::Style pick the face.
-  return role == Role::User ? EpdFontFamily::ITALIC : EpdFontFamily::REGULAR;
+  if (role != Role::User) return EpdFontFamily::REGULAR;
+  if (draft) return EpdFontFamily::ITALIC;
+  return (cue_ == Cue::Bold || cue_ == Cue::BoldPrefix || cue_ == Cue::BarBold) ? EpdFontFamily::BOLD
+                                                                                : EpdFontFamily::REGULAR;
+}
+
+BlockStyle TranscriptView::blockStyleFor(const Role role) const {
+  BlockStyle style;
+  style.alignment =
+      (role == Role::User && cue_ == Cue::Right) ? CssTextAlign::Right : toCssAlign(SETTINGS.paragraphAlignment);
+  style.textAlignDefined = true;
+  return style;
+}
+
+int TranscriptView::indentFor(const Role role) const {
+  if (role != Role::User) return 0;
+  switch (cue_) {
+    case Cue::Bar:
+    case Cue::BarBold:
+      return kBarW + kBarGap;
+    case Cue::Right:
+      return textWidth_ / 5;
+    case Cue::Hang:
+      return renderer_.getTextWidth(fontId_, kHangMarker);
+    case Cue::Box:
+      return kBoxPad;
+    default:
+      return 0;
+  }
+}
+
+int TranscriptView::rightInsetFor(const Role role) const {
+  return (role == Role::User && cue_ == Cue::Box) ? kBoxPad : 0;
 }
 
 // ---------------------------------------------------------------------------
 // streaming layout
 
 void TranscriptView::startParagraph() {
-  BlockStyle style;
-  style.alignment = toCssAlign(SETTINGS.paragraphAlignment);
-  style.textAlignDefined = true;
   parsed_.reset(new ParsedText(SETTINGS.extraParagraphSpacing != 0, SETTINGS.hyphenationEnabled != 0,
-                               SETTINGS.focusReadingEnabled != 0, style));
+                               SETTINGS.focusReadingEnabled != 0, blockStyleFor(liveRole_)));
   paragraphOpen_ = true;
 }
 
@@ -145,11 +214,13 @@ void TranscriptView::beginTurn(const Role role, const uint32_t turnOffset, const
   liveTurnLine_ = 0;
   liveTurnRefd_ = false;
   startParagraph();
-  // Turn separator: a full line-height gap, the same break the reader gets from
-  // BlockStyle::fromBrElement. It is line 0 of the turn so that a replay from
-  // the page index reproduces it at exactly the same place.
+  // Turn separator: gapPct_ of a line. It is line 0 of the turn so that a
+  // replay from the page index reproduces it at exactly the same place.
   if (turnIndex > 0) emitLine(Line());
-  if (role == Role::User) parsed_->addWord(kUserMarker, EpdFontFamily::REGULAR);
+  if (role == Role::User && cueHasPrefixWord()) {
+    parsed_->addWord(cue_ == Cue::Label ? kUserLabel : kUserMarker,
+                     cue_ == Cue::Label ? EpdFontFamily::BOLD : styleFor(role));
+  }
 }
 
 void TranscriptView::feedWords(const char* text, const size_t len, const bool holdTail) {
@@ -208,7 +279,7 @@ void TranscriptView::appendText(const char* text) {
 
   if (parsed_ && !parsed_->isEmpty()) {
     parsed_->layoutAndExtractLines(
-        renderer_, fontId_, static_cast<uint16_t>(textWidth_),
+        renderer_, fontId_, static_cast<uint16_t>(widthFor(liveRole_)),
         [this](std::shared_ptr<TextBlock> line, uint32_t) { emitLine(std::move(line)); },
         /*includeLastLine=*/false);
   }
@@ -223,7 +294,7 @@ void TranscriptView::flushTail() {
   if (!parsed_) return;
   if (!parsed_->isEmpty() && ready()) {
     parsed_->layoutAndExtractLines(
-        renderer_, fontId_, static_cast<uint16_t>(textWidth_),
+        renderer_, fontId_, static_cast<uint16_t>(widthFor(liveRole_)),
         [this](std::shared_ptr<TextBlock> line, uint32_t) { emitLine(std::move(line)); },
         /*includeLastLine=*/true);
   }
@@ -256,19 +327,33 @@ void TranscriptView::endTurn() {
 }
 
 void TranscriptView::emitLine(Line line) {
-  if (linesPerPage_ == 0) return;
-  const size_t page = docLine_ / linesPerPage_;
+  if (bodyHeight_ <= 0 || lineAdvance_ <= 0) return;
+  // Page breaks by height: a line that would overrun the body opens the next
+  // page. loadPage() applies exactly the same rule, so a page replayed from the
+  // index holds exactly the lines the live path put on it.
+  size_t page = livePage_;
+  int used = pageUsed_;
+  if (docLine_ == 0) {
+    page = 0;
+    used = 0;
+  } else if (used > 0 && used + (line ? lineAdvance_ : gapPx_) > bodyHeight_) {
+    page++;
+    used = 0;
+  }
   // Only the final page can still grow, so a page that has not been indexed yet
   // is by definition the one this line opens.
   if (page >= spool_.pageCount()) {
     spool_.appendPage({liveTurnOffset_, liveTurnIndex_, liveTurnLine_});
   }
+  const bool firstText = line && liveTurnLine_ == (liveTurnIndex_ > 0 ? 1 : 0);
+  const int h = heightOf(line, used);
   docLine_++;
   liveTurnLine_++;
   livePage_ = page;
+  pageUsed_ = used + h;
 
-  if (page == curPage_ && lines_.size() < linesPerPage_) {
-    lines_.push_back(std::move(line));
+  if (page == curPage_) {
+    pushShown(std::move(line), liveRole_, firstText);
     // The document just took a line the draft may have been using.
     if (!draft_.empty()) {
       layoutDraft();
@@ -279,11 +364,18 @@ void TranscriptView::emitLine(Line line) {
   // only the displayed page's TextBlocks live in RAM.
 }
 
+void TranscriptView::pushShown(Line line, const Role role, const bool firstText) {
+  const int h = heightOf(line, shownUsed_);
+  lineInfo_.push_back({shownUsed_, role, firstText});
+  lines_.push_back(std::move(line));
+  shownUsed_ += h;
+}
+
 // ---------------------------------------------------------------------------
 // replay from the spool
 
 uint16_t TranscriptView::layoutTurnText(const Role role, const uint16_t turnIndex, const std::string& text,
-                                        const LineSink& sink) {
+                                        const LineSink& sink, const bool draft) {
   uint16_t produced = 0;
   const auto take = [&](Line line) {
     sink(std::move(line), produced);
@@ -294,10 +386,9 @@ uint16_t TranscriptView::layoutTurnText(const Role role, const uint16_t turnInde
   // lineOffset reproduces the gap in exactly the same place the live path put it.
   if (turnIndex > 0) take(Line());
 
-  BlockStyle style;
-  style.alignment = toCssAlign(SETTINGS.paragraphAlignment);
-  style.textAlignDefined = true;
-  const EpdFontFamily::Style wordStyle = styleFor(role);
+  const BlockStyle style = blockStyleFor(role);
+  const EpdFontFamily::Style wordStyle = styleFor(role, draft);
+  const uint16_t width = static_cast<uint16_t>(widthFor(role));
 
   const char* raw = text.c_str();
   const char* segment = raw;
@@ -306,7 +397,13 @@ uint16_t TranscriptView::layoutTurnText(const Role role, const uint16_t turnInde
     if (*p != '\n' && *p != '\0') continue;
     ParsedText parsed(SETTINGS.extraParagraphSpacing != 0, SETTINGS.hyphenationEnabled != 0,
                       SETTINGS.focusReadingEnabled != 0, style);
-    if (first && role == Role::User) parsed.addWord(kUserMarker, EpdFontFamily::REGULAR);
+    if (first && role == Role::User && cueHasPrefixWord()) {
+      if (draft || cue_ != Cue::Label) {
+        parsed.addWord(kUserMarker, wordStyle);
+      } else {
+        parsed.addWord(kUserLabel, EpdFontFamily::BOLD);
+      }
+    }
     first = false;
 
     std::string word;
@@ -325,7 +422,7 @@ uint16_t TranscriptView::layoutTurnText(const Role role, const uint16_t turnInde
     if (!parsed.isEmpty()) {
       // Whole-paragraph layout. Greedy line breaking is prefix-deterministic, so
       // this reproduces exactly the settled lines the streaming path produced.
-      parsed.layoutAndExtractLines(renderer_, fontId_, static_cast<uint16_t>(textWidth_),
+      parsed.layoutAndExtractLines(renderer_, fontId_, width,
                                    [&](std::shared_ptr<TextBlock> line, uint32_t) { take(std::move(line)); });
     }
     if (*p == '\0') break;
@@ -338,11 +435,15 @@ uint16_t TranscriptView::layoutTurnText(const Role role, const uint16_t turnInde
 // deep-sleep-wake path: the spool survived, RAM did not, so there is no index
 // until we walk the raw text once. No TextBlock is retained while scanning
 // (curPage_ is parked out of range), so RAM stays at one page throughout.
-void TranscriptView::rebuildIndexFrom(const uint32_t offset, const uint16_t turnIndex, const uint32_t docLine) {
+void TranscriptView::rebuildIndexFrom(const uint32_t offset, const uint16_t turnIndex, const uint32_t docLine,
+                                      const uint16_t pageUsed) {
   lines_.clear();
+  lineInfo_.clear();
+  shownUsed_ = 0;
   pendingFrom_ = 0;
   docLine_ = docLine;
-  livePage_ = (linesPerPage_ && docLine) ? (docLine - 1) / linesPerPage_ : 0;
+  livePage_ = (docLine && spool_.pageCount()) ? spool_.pageCount() - 1 : 0;
+  pageUsed_ = docLine ? pageUsed : 0;
   // Nothing is retained while scanning — curPage_ is parked out of range — so
   // RAM stays at one page however long the conversation is.
   const size_t saved = curPage_;
@@ -380,7 +481,8 @@ void TranscriptView::rebuildIndexFrom(const uint32_t offset, const uint16_t turn
 void TranscriptView::saveIndex() const {
   // Only ever called at a turn boundary, so the cursor covers whole turns and
   // resuming from it needs no mid-turn layout state.
-  const ConversationSpool::IndexCursor cursor{spool_.size(), spool_.turnCount(), docLine_};
+  const ConversationSpool::IndexCursor cursor{spool_.size(), spool_.turnCount(), docLine_,
+                                              static_cast<uint16_t>(pageUsed_)};
   spool_.saveIndex(cursor);
 }
 
@@ -393,9 +495,12 @@ void TranscriptView::restoreIndex() {
   // begin() only resets these when the render spec changes and the early return
   // below skipped them entirely for an empty spool.
   lines_.clear();
+  lineInfo_.clear();
+  shownUsed_ = 0;
   pendingFrom_ = 0;
   docLine_ = 0;
   livePage_ = 0;
+  pageUsed_ = 0;
   curPage_ = 0;
   liveTurnOffset_ = 0;
   liveTurnIndex_ = 0;
@@ -414,8 +519,11 @@ void TranscriptView::restoreIndex() {
     // indexes written before the session-switch fix carry the PREVIOUS
     // conversation's line counter, which shows up as a footer promising pages
     // that do not exist. Distrust the cursor and rebuild rather than inherit it.
-    const uint32_t implied = static_cast<uint32_t>(spool_.pageCount()) * linesPerPage_;
-    if (cursor.docLine > implied) {
+    // A page holds at most one line per gap-height (separators are the
+    // shortest lines), plus one.
+    const int shortest = std::max(1, std::min(lineAdvance_, gapPx_ > 0 ? gapPx_ : lineAdvance_));
+    const uint32_t implied = static_cast<uint32_t>(spool_.pageCount()) * (bodyHeight_ / shortest + 1);
+    if (cursor.docLine > implied || cursor.pageUsed > bodyHeight_ || (cursor.docLine > 0) != (spool_.pageCount() > 0)) {
       LOG_INF("TVIEW", "index cursor implausible (%u lines vs %u pages), rebuilding",
               static_cast<unsigned>(cursor.docLine), static_cast<unsigned>(spool_.pageCount()));
       loaded = false;
@@ -424,10 +532,10 @@ void TranscriptView::restoreIndex() {
   if (loaded) {
     // Everything before the cursor is already indexed; lay out only what has
     // been appended since. Usually nothing, which is the whole point.
-    rebuildIndexFrom(cursor.spoolOffset, cursor.turnIndex, cursor.docLine);
+    rebuildIndexFrom(cursor.spoolOffset, cursor.turnIndex, cursor.docLine, cursor.pageUsed);
   } else {
     spool_.clearIndex();
-    rebuildIndexFrom(0, 0, 0);
+    rebuildIndexFrom(0, 0, 0, 0);
   }
   saveIndex();
 
@@ -437,21 +545,34 @@ void TranscriptView::restoreIndex() {
 
 void TranscriptView::loadPage(const size_t page) {
   lines_.clear();
+  lineInfo_.clear();
+  shownUsed_ = 0;
   pendingFrom_ = 0;
   fullPaint_ = true;
   draftWasDrawn_ = false;
-  if (page >= spool_.pageCount() || linesPerPage_ == 0) return;
+  if (page >= spool_.pageCount() || bodyHeight_ <= 0) return;
 
   const ConversationSpool::PageRef ref = spool_.page(page);
   uint32_t offset = ref.turnOffset;
   uint16_t index = ref.turnIndex;
   uint16_t skip = ref.lineOffset;
 
-  while (lines_.size() < linesPerPage_) {
+  // The same height rule emitLine() breaks pages with: stop at the first line
+  // that would overrun the body.
+  bool full = false;
+  while (!full) {
     ConversationSpool::Turn turn;
     if (!spool_.readTurnAt(offset, index, turn)) break;
-    layoutTurnText(turn.role, index, turn.text, [this, skip](Line line, const uint16_t n) {
-      if (n >= skip && lines_.size() < linesPerPage_) lines_.push_back(std::move(line));
+    const Role role = turn.role;
+    const uint16_t textStart = index > 0 ? 1 : 0;
+    layoutTurnText(role, index, turn.text, [this, skip, role, textStart, &full](Line line, const uint16_t n) {
+      if (full || n < skip) return;
+      if (shownUsed_ > 0 && shownUsed_ + (line ? lineAdvance_ : gapPx_) > bodyHeight_) {
+        full = true;
+        return;
+      }
+      const bool firstText = line && n == textStart;
+      pushShown(std::move(line), role, firstText);
     });
     if (turn.nextOffset <= offset || turn.nextOffset >= spool_.size()) break;
     offset = turn.nextOffset;
@@ -463,11 +584,6 @@ void TranscriptView::loadPage(const size_t page) {
 // ---------------------------------------------------------------------------
 // live utterance
 
-uint16_t TranscriptView::draftRoom() const {
-  if (linesPerPage_ == 0 || lines_.size() >= linesPerPage_) return 0;
-  return static_cast<uint16_t>(linesPerPage_ - lines_.size());
-}
-
 bool TranscriptView::showsDraft() const {
   // Only ever on the live tail page. If the reader has paged back, the draft
   // would be describing a place they are not looking at.
@@ -477,33 +593,35 @@ bool TranscriptView::showsDraft() const {
 void TranscriptView::layoutDraft() {
   draftLines_.clear();
   if (draft_.empty() || !ready()) return;
-  const uint16_t room = draftRoom();
-  if (room == 0) return;
 
-  // Laid out exactly as the committed turn will be — same role, same separator,
-  // same wrap width — so the final transcript replaces it without shifting.
+  // Laid out exactly as the committed turn will be — same separator, same wrap
+  // width — so the final transcript replaces it without shifting. Only the face
+  // differs: italic, because these words are still provisional.
   std::vector<Line> all;
-  layoutTurnText(Role::User, spool_.turnCount(), draft_,
-                 [&all](Line line, uint16_t) { all.push_back(std::move(line)); });
-
-  if (all.size() <= room) {
-    draftLines_ = std::move(all);
-    return;
-  }
+  layoutTurnText(
+      Role::User, spool_.turnCount(), draft_, [&all](Line line, uint16_t) { all.push_back(std::move(line)); },
+      /*draft=*/true);
+  if (all.empty()) return;
 
   // An utterance can outgrow the space left on the page. Keep the TAIL: the
   // words just spoken are the ones worth seeing, and the draft must not push
   // the page over — a turn would then commit onto a page nobody is looking at.
   //
   // The separator is structural, not content, so it is anchored rather than
-  // trimmed. Dropping it would put the draft one line higher than the committed
-  // turn, and the text would visibly jump down when the transcript settled —
-  // which is the exact thing this draft exists to avoid.
-  // With room for a single line, anchoring the separator would leave a blank
-  // draft, so the one line goes to text.
-  const bool hasSeparator = !all.empty() && !all.front() && room >= 2;
-  const size_t keep = hasSeparator ? room - 1 : room;
-  if (hasSeparator) draftLines_.push_back(Line());
+  // trimmed. Dropping it would put the draft higher than the committed turn,
+  // and the text would visibly jump down when the transcript settled — which is
+  // the exact thing this draft exists to avoid. With room for a single text
+  // line, the room goes to text.
+  const bool hasSeparator = !all.front();
+  const int room = bodyHeight_ - shownUsed_;
+  const int sepH = hasSeparator ? heightOf(Line(), shownUsed_) : 0;
+  const size_t textLines = all.size() - (hasSeparator ? 1 : 0);
+  int fitWithSep = (room - sepH) / std::max(1, lineAdvance_);
+  const bool keepSep = hasSeparator && fitWithSep >= 1 && room / std::max(1, lineAdvance_) >= 2;
+  const int fit = keepSep ? fitWithSep : room / std::max(1, lineAdvance_);
+  if (fit <= 0) return;
+  const size_t keep = std::min<size_t>(textLines, static_cast<size_t>(fit));
+  if (keepSep) draftLines_.push_back(Line());
   for (size_t i = all.size() - keep; i < all.size(); ++i) draftLines_.push_back(std::move(all[i]));
 }
 
@@ -522,9 +640,12 @@ void TranscriptView::clearDraft() {
 }
 
 void TranscriptView::drawDraft() {
-  for (size_t i = 0; i < draftLines_.size(); ++i) {
-    const Line& line = draftLines_[i];
-    if (line) line->render(renderer_, fontId_, textLeft_, lineY(lines_.size() + i));
+  int used = shownUsed_;
+  const int x = textLeft_ + indentFor(Role::User);
+  for (const Line& line : draftLines_) {
+    const int h = heightOf(line, used);
+    if (line) line->render(renderer_, fontId_, x, bodyTop_ + used);
+    used += h;
   }
   draftWasDrawn_ = true;
 }
@@ -916,8 +1037,37 @@ void TranscriptView::drawHeader() const {
 
 void TranscriptView::drawLine(const size_t index) const {
   const Line& line = lines_[index];
-  if (!line) return;  // separator
-  line->render(renderer_, fontId_, textLeft_, lineY(index));
+  const LineInfo& info = lineInfo_[index];
+  const int y = lineY(index);
+  if (!line) {
+    // Separator. Cue::Rule draws a hairline across the gap above a user turn
+    // (none when the gap fell at the top of a page and so has no height).
+    const int h = (index + 1 < lineInfo_.size() ? lineInfo_[index + 1].top : shownUsed_) - info.top;
+    if (cue_ == Cue::Rule && info.role == Role::User && h > 0) {
+      renderer_.fillRect(textLeft_, y + h / 2, textWidth_, 1, true);
+    }
+    // Cue::Box: the gap after a user turn is where its box closes.
+    if (cue_ == Cue::Box && index > 0 && lineInfo_[index - 1].role == Role::User && lines_[index - 1]) {
+      renderer_.fillRect(textLeft_, y, textWidth_, 1, true);
+    }
+    return;
+  }
+  const bool user = info.role == Role::User;
+  if (user && (cue_ == Cue::Bar || cue_ == Cue::BarBold)) {
+    renderer_.fillRect(textLeft_, y, kBarW, lineAdvance_, true);
+  }
+  if (user && cue_ == Cue::Box) {
+    // Sides on every line; the top on the first; the bottom where the turn
+    // ends — at the next separator, or here if it is the page's last line.
+    renderer_.fillRect(textLeft_, y, 1, lineAdvance_, true);
+    renderer_.fillRect(textLeft_ + textWidth_ - 1, y, 1, lineAdvance_, true);
+    if (info.firstText) renderer_.fillRect(textLeft_, y, textWidth_, 1, true);
+    if (index + 1 == lines_.size()) renderer_.fillRect(textLeft_, y + lineAdvance_ - 1, textWidth_, 1, true);
+  }
+  if (user && cue_ == Cue::Hang && info.firstText) {
+    renderer_.drawText(fontId_, textLeft_, y, kHangMarker, true, styleFor(Role::User));
+  }
+  line->render(renderer_, fontId_, textLeft_ + indentFor(info.role), y);
 }
 
 void TranscriptView::drawFooter() const {

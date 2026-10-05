@@ -482,6 +482,9 @@ namespace {
 // rejected rather than misread.
 constexpr uint32_t kIndexMagic = 0x58444953;  // "SIDX"
 constexpr uint8_t kIndexVersion = 2;          // v2 adds the turn table
+// Page breaks by pixel height (turn gaps narrower than a line). Not a version
+// bump: readSummary() rejects other versions, which would blank every picker row.
+constexpr uint8_t kLayoutRev = 1;
 
 struct IndexHeader {
   uint32_t magic;
@@ -491,12 +494,17 @@ struct IndexHeader {
   uint16_t viewportWidth;
   uint16_t linesPerPage;
   uint8_t fontPointSize;
-  uint8_t pad2[3];
+  // Held in what was padding, so files from before pixel pagination keep the
+  // same layout (and their turn table stays readable for the picker); their
+  // zero layoutRev fails the spec check, which rebuilds the page index.
+  uint8_t gapPct;
+  uint8_t cue;
+  uint8_t layoutRev;
   uint32_t spoolSize;    // the spool this index was built against
   uint32_t spoolOffset;  // resume cursor
   uint32_t docLine;
   uint16_t turnIndex;
-  uint16_t pad3;
+  uint16_t pageUsed;
   uint32_t pageCount;
   uint32_t turnRefCount;  // v2
 };
@@ -513,10 +521,14 @@ bool ConversationSpool::saveIndex(const IndexCursor& cursor) const {
   h.viewportWidth = spec_.viewportWidth;
   h.linesPerPage = spec_.linesPerPage;
   h.fontPointSize = spec_.fontPointSize;
+  h.gapPct = spec_.gapPct;
+  h.cue = spec_.cue;
+  h.layoutRev = kLayoutRev;
   h.spoolSize = size_;
   h.spoolOffset = cursor.spoolOffset;
   h.docLine = cursor.docLine;
   h.turnIndex = cursor.turnIndex;
+  h.pageUsed = cursor.pageUsed;
   h.pageCount = static_cast<uint32_t>(pages_.size());
   h.turnRefCount = static_cast<uint32_t>(turns_.size());
 
@@ -558,7 +570,8 @@ bool ConversationSpool::loadIndex(IndexCursor& cursor) {
   // A spec change means the file describes a different layout entirely, and a
   // spool shorter than the index means it was replaced underneath us.
   ok = ok && h.fontId == spec_.fontId && h.viewportWidth == spec_.viewportWidth &&
-       h.linesPerPage == spec_.linesPerPage && h.fontPointSize == spec_.fontPointSize;
+       h.linesPerPage == spec_.linesPerPage && h.fontPointSize == spec_.fontPointSize && h.gapPct == spec_.gapPct &&
+       h.cue == spec_.cue && h.layoutRev == kLayoutRev;
   ok = ok && h.spoolSize <= size_ && h.spoolOffset <= size_;
   if (!ok) {
     f.close();
@@ -602,6 +615,7 @@ bool ConversationSpool::loadIndex(IndexCursor& cursor) {
   cursor.spoolOffset = h.spoolOffset;
   cursor.turnIndex = h.turnIndex;
   cursor.docLine = h.docLine;
+  cursor.pageUsed = h.pageUsed;
   LOG_INF("SPOOL", "index loaded: %u pages, %u turns, resume at %u/%u", static_cast<unsigned>(pages_.size()),
           static_cast<unsigned>(turns_.size()), static_cast<unsigned>(cursor.spoolOffset),
           static_cast<unsigned>(size_));

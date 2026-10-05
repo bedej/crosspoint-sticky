@@ -289,6 +289,11 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t readerMenuStyle = READER_MENU_LIST;
   // SD card font family name (empty = use built-in fontFamily)
   char sdFontFamilyName[32] = "";
+  // Conversation screen font, independent of the reader's. Empty = the reader's
+  // family; "builtin-sans" / "builtin-serif" = a built-in face; anything else =
+  // an installed SD family.
+  char convFontFamily[32] = "";
+  uint8_t convFontPointSize = 0;  // 0 = the reader's size
   // Dictionary folder name under /dictionaries (empty = no dictionary)
   char dictionaryName[32] = "";
   // Show hidden files/directories (starting with '.') in the file browser (0 = hidden, 1 = show)
@@ -342,6 +347,12 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
     return (shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP) ? 10 : 400;
   }
   int getReaderFontId() const;
+  // The SD family the conversation screen needs resident ("" = a built-in face),
+  // the size it asked for, and the font and line compression it renders with.
+  const char* conversationSdFamily() const;
+  uint8_t conversationPointSize() const { return convFontPointSize ? convFontPointSize : fontPointSize; }
+  int getConversationFontId() const;
+  float getConversationLineCompression() const;
 
   // Drop the SD font selection and fall back to the built-in family. The reader
   // point size comes back into BUILTIN_READER_POINT_SIZES with it, since that is

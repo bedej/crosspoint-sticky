@@ -1,6 +1,7 @@
 #pragma once
 // TranscriptView — the conversation rendered as a real flowed e-reader document:
-// justified, hyphenated, italic for the user's turns, paged rather than scrolled.
+// justified, hyphenated, the user's turns set apart by a cue, paged rather than
+// scrolled. Italic is reserved for the provisional live transcript.
 //
 // It does NOT implement text layout. ParsedText::layoutAndExtractLines is the
 // engine, and its `includeLastLine=false` mode is the streaming primitive:
@@ -37,6 +38,29 @@ class TranscriptView {
   using Role = ConversationSpool::Role;
 
   TranscriptView(GfxRenderer& renderer, ConversationSpool& spool) : renderer_(renderer), spool_(spool) {}
+
+  // How a user turn is set apart from the agent's. Italic is not on the list:
+  // it is the live draft's cue, and committed text must not look provisional.
+  enum class Cue : uint8_t {
+    Prefix,      // "> " then regular text
+    Bold,        // bold text
+    BoldPrefix,  // "> " then bold text
+    Bar,         // a rule down the left, text indented
+    BarBold,     // the rule, with bold text
+    Right,       // right-aligned with a wide left inset, like a chat bubble
+    Rule,        // a hairline across the gap above the turn
+    Hang,        // "> " hanging in an indent, regular text
+    Label,       // a bold "You:" speaker label, as interview transcripts do
+    Box,         // a hairline box around the turn: the monochrome chat bubble
+    Count
+  };
+  static const char* cueName(Cue cue);
+  // Turn gap as a percentage of a line (0-100), and the user-turn cue. Applied
+  // at the next begin(); both are part of the render spec.
+  static void setTurnStyle(uint8_t gapPct, Cue cue) {
+    gapPct_ = gapPct > 100 ? 100 : gapPct;
+    cue_ = cue < Cue::Count ? cue : Cue::Bold;
+  }
 
   // Measure the panel, derive the page geometry, and invalidate the spool's page
   // index if the render spec changed (font size, margin, viewport).
@@ -119,6 +143,12 @@ class TranscriptView {
   void noteContentChangedUnderRail() { railContentChanged_ = true; }
   // Jump to the page a turn STARTS on. Returns true when the page changed.
   bool jumpToTurn(uint16_t turnIndex);
+  // Load page `page` even if it is already current (after restoreIndex() no
+  // page's lines are loaded, and jumpToTurn() would skip page 0).
+  void showPage(size_t page) {
+    curPage_ = page;
+    loadPage(page);
+  }
   // Turn behind visible rail row `row`. Lets a script drive the rail without a
   // parallel lookup that could drift from what a tap resolves to.
   bool railRowTurn(size_t row, uint16_t& turnIndex) const;
@@ -142,7 +172,7 @@ class TranscriptView {
   // live cursor at the end of the session.
   void restoreIndex();
   // The full re-layout, kept as the correctness backstop.
-  void rebuildIndex() { rebuildIndexFrom(0, 0, 0); }
+  void rebuildIndex() { rebuildIndexFrom(0, 0, 0, 0); }
 
   bool hasPendingAppend() const { return pendingFrom_ < lines_.size(); }
   void markFullPaint() { fullPaint_ = true; }
@@ -164,9 +194,14 @@ class TranscriptView {
  private:
   size_t pageWhereTurnStarts(uint16_t turnIndex) const;
   size_t pageCountOrOne() const { return spool_.pageCount() ? spool_.pageCount() : 1; }
-  // A null entry is a turn separator: a full line-height gap, the same thing
-  // BlockStyle::fromBrElement injects between blocks in the reader.
+  // A null entry is a turn separator: a gap of gapPct_ of a line, or nothing
+  // when it falls at the top of a page.
   using Line = std::shared_ptr<TextBlock>;
+  struct LineInfo {
+    int top = 0;  // y within the body
+    Role role = Role::Agent;
+    bool firstText = false;  // the turn's first text line (where Hang draws its marker)
+  };
 
   void startParagraph();
   void flushTail();  // hard flush: emit the held last line too
@@ -178,14 +213,22 @@ class TranscriptView {
   // the turn. The one place turn text becomes lines on the replay path, shared
   // by page loads and index rebuilds so the two can never drift apart.
   using LineSink = std::function<void(Line, uint16_t)>;
-  uint16_t layoutTurnText(Role role, uint16_t turnIndex, const std::string& text, const LineSink& sink);
-  EpdFontFamily::Style styleFor(Role role) const;
+  uint16_t layoutTurnText(Role role, uint16_t turnIndex, const std::string& text, const LineSink& sink,
+                          bool draft = false);
+  EpdFontFamily::Style styleFor(Role role, bool draft = false) const;
+  BlockStyle blockStyleFor(Role role) const;
+  int indentFor(Role role) const;  // left inset of a role's text column
+  int rightInsetFor(Role role) const;
+  int widthFor(Role role) const { return textWidth_ - indentFor(role) - rightInsetFor(role); }
+  bool cueHasPrefixWord() const { return cue_ == Cue::Prefix || cue_ == Cue::BoldPrefix || cue_ == Cue::Label; }
+  // Height a line takes on the page; a separator opening a page takes none.
+  int heightOf(const Line& line, int usedOnPage) const { return line ? lineAdvance_ : (usedOnPage == 0 ? 0 : gapPx_); }
+  // Append to the displayed page.
+  void pushShown(Line line, Role role, bool firstText);
 
-  void rebuildIndexFrom(uint32_t offset, uint16_t turnIndex, uint32_t docLine);
+  void rebuildIndexFrom(uint32_t offset, uint16_t turnIndex, uint32_t docLine, uint16_t pageUsed);
   void saveIndex() const;
   void layoutDraft();
-  // Lines left on this page under the document's tail.
-  uint16_t draftRoom() const;
   bool showsDraft() const;
   void drawDraft();
   void eraseFrom(size_t lineIndex) const;
@@ -204,7 +247,7 @@ class TranscriptView {
   int drawBluetoothGlyph(int right, int top) const;
   void drawLine(size_t index) const;
   void drawFooter() const;
-  int lineY(size_t index) const { return bodyTop_ + static_cast<int>(index) * lineAdvance_; }
+  int lineY(size_t index) const { return bodyTop_ + (index < lineInfo_.size() ? lineInfo_[index].top : shownUsed_); }
 
   GfxRenderer& renderer_;
   ConversationSpool& spool_;
@@ -217,7 +260,11 @@ class TranscriptView {
   int textWidth_ = 0;
   int bodyTop_ = 0;
   int footerTop_ = 0;
-  uint16_t linesPerPage_ = 0;
+  int bodyHeight_ = 0;
+  int gapPx_ = 0;
+  uint16_t linesPerPage_ = 0;  // nominal: text lines only, for the spec and ready()
+  static inline uint8_t gapPct_ = 67;
+  static inline Cue cue_ = Cue::Bold;
 
   // chrome
   Link link_ = Link::Offline;
@@ -229,6 +276,8 @@ class TranscriptView {
 
   // displayed page
   std::vector<Line> lines_;
+  std::vector<LineInfo> lineInfo_;  // parallel to lines_
+  int shownUsed_ = 0;               // body pixels lines_ occupy
   size_t curPage_ = 0;
   size_t pendingFrom_ = 0;  // first line not yet pushed to the panel
   bool fullPaint_ = true;
@@ -242,6 +291,7 @@ class TranscriptView {
   bool liveTurnRefd_ = false;  // this turn is already in the spool's turn table
   uint32_t docLine_ = 0;       // settled lines in the whole flowed document
   size_t livePage_ = 0;        // page the tail is currently landing on
+  int pageUsed_ = 0;           // body pixels used on livePage_
   bool paragraphOpen_ = false;
   std::string pendingWord_;  // word fragment carried across delta boundaries
 

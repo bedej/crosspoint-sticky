@@ -33,6 +33,7 @@
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
+#include "SerialFontUpload.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/network/AgentVoiceActivity.h"
@@ -685,11 +686,15 @@ void loop() {
       } else if (cmd.startsWith("ASK ")) {
         // Test hooks for the conversation transcript view — see
         // AgentVoiceActivity::injectUserTurn.
-        AgentVoiceActivity::injectUserTurn(cmd.substring(4).c_str());
+        String text = cmd.substring(4);
+        text.replace("\\n", "\n");  // a serial line can't carry a newline
+        AgentVoiceActivity::injectUserTurn(text.c_str());
       } else if (cmd.startsWith("PARTIAL ")) {
         AgentVoiceActivity::injectPartial(cmd.substring(8).c_str());
       } else if (cmd.startsWith("SAY ")) {
-        AgentVoiceActivity::injectAgentTurn(cmd.substring(4).c_str());
+        String text = cmd.substring(4);
+        text.replace("\\n", "\n");
+        AgentVoiceActivity::injectAgentTurn(text.c_str());
       } else if (cmd == "PAGENEXT") {
         AgentVoiceActivity::requestPageMove(1);
       } else if (cmd == "PAGEPREV") {
@@ -724,6 +729,31 @@ void loop() {
         }
       } else if (cmd.startsWith("OPENCONV ")) {
         AgentVoiceActivity::requestOpenConversation(std::string(cmd.substring(9).c_str()));
+      } else if (cmd.startsWith("PUTFONT ")) {
+        handleSerialPutFont(cmd.substring(8));
+      } else if (cmd.startsWith("TVFONT ")) {
+        // CMD:TVFONT <family> <pt>
+        const String a = cmd.substring(7);
+        const int sp = a.lastIndexOf(' ');
+        if (sp > 0) {
+          AgentVoiceActivity::requestFont(std::string(a.substring(0, sp).c_str()),
+                                          static_cast<uint8_t>(a.substring(sp + 1).toInt()));
+        }
+      } else if (cmd.startsWith("TVSTYLE ")) {
+        // CMD:TVSTYLE <gap percent> <cue name>
+        const String a = cmd.substring(8);
+        const int sp = a.indexOf(' ');
+        const int gap = a.substring(0, sp).toInt();
+        const String name = sp > 0 ? a.substring(sp + 1) : String("bold");
+        uint8_t cue = static_cast<uint8_t>(TranscriptView::Cue::Bold);
+        for (uint8_t c = 0; c < static_cast<uint8_t>(TranscriptView::Cue::Count); ++c) {
+          if (name == TranscriptView::cueName(static_cast<TranscriptView::Cue>(c))) cue = c;
+        }
+        AgentVoiceActivity::requestTurnStyle(static_cast<uint8_t>(gap), cue);
+        LOG_INF("MAIN", "TVSTYLE gap=%d cue=%s", gap, TranscriptView::cueName(static_cast<TranscriptView::Cue>(cue)));
+      } else if (cmd.startsWith("AWAKE ")) {
+        AgentVoiceActivity::setKeepAwake(cmd.substring(6).toInt() != 0);
+        LOG_INF("MAIN", "keep awake %s", cmd.substring(6).toInt() != 0 ? "on" : "off");
       } else if (cmd.startsWith("REFLOW ")) {
         AgentVoiceActivity::requestReflow(static_cast<uint8_t>(cmd.substring(7).toInt()));
       } else if (cmd == "CONVS") {
