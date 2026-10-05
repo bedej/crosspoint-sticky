@@ -537,6 +537,9 @@ void TranscriptView::restoreIndex() {
     spool_.clearIndex();
     rebuildIndexFrom(0, 0, 0, 0);
   }
+  // Every turn in the spool now has its rail entry, so the endTurn() that runs
+  // on exit must not record the (already recorded) last one again.
+  liveTurnRefd_ = true;
   saveIndex();
 
   LOG_INF("TVIEW", "index ready in %lums: %u lines, %u pages", millis() - started, static_cast<unsigned>(docLine_),
