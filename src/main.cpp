@@ -751,6 +751,17 @@ void loop() {
         }
         AgentVoiceActivity::requestTurnStyle(static_cast<uint8_t>(gap), cue);
         LOG_INF("MAIN", "TVSTYLE gap=%d cue=%s", gap, TranscriptView::cueName(static_cast<TranscriptView::Cue>(cue)));
+      } else if (cmd.startsWith("BAUD ")) {
+        // Test hook: a faster link for bulk transfers (fonts, screenshots). The
+        // board comes back at the boot rate on its next reset, which opening the
+        // port causes, so a host that loses track only has to reopen.
+        const unsigned long baud = static_cast<unsigned long>(cmd.substring(5).toInt());
+        if (baud >= 115200 && baud <= 2000000) {
+          logSerial.printf("BAUD_OK %lu\n", baud);
+          logSerial.flush();
+          delay(20);
+          logSerial.updateBaudRate(baud);
+        }
       } else if (cmd.startsWith("AWAKE ")) {
         AgentVoiceActivity::setKeepAwake(cmd.substring(6).toInt() != 0);
         LOG_INF("MAIN", "keep awake %s", cmd.substring(6).toInt() != 0 ? "on" : "off");
