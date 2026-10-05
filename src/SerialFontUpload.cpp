@@ -2,13 +2,13 @@
 
 #include <HalStorage.h>
 #include <Logging.h>
+#include <Memory.h>
 #include <esp_rom_crc.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
 #include <algorithm>
 #include <cstdio>
-#include <memory>
 
 #include "FontInstaller.h"
 #include "SdCardFontSystem.h"
@@ -72,7 +72,7 @@ void handleSerialPutFont(const String& args) {
     fail("open");
     return;
   }
-  std::unique_ptr<uint8_t[]> buf(new (std::nothrow) uint8_t[kBlock]);
+  auto buf = makeUniqueNoThrow<uint8_t[]>(kBlock);
   if (!buf) {
     file.close();
     Storage.remove(part);
