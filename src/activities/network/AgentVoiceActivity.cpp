@@ -1256,7 +1256,24 @@ void AgentVoiceActivity::handleMessage(const char* json, size_t len) {
     }
     markDirty();
   } else if (!strcmp(t, "answer.done")) {
-    LOG_INF("AVA", "answer.done answerLen=%u", (unsigned)answer_.length());
+    // The server says which agent actually answered. Believe it over the local
+    // setting: the two are supposed to agree, and when they do not it is the
+    // screen that is wrong — it showed M through a whole conversation that
+    // Hermes was answering, because the choice never reached the server. A
+    // mismatch is corrected on the spot and said out loud, rather than leaving
+    // the header quietly lying about who you are talking to.
+    const char* answeredBy = static_cast<const char*>(doc["backend"] | "");
+    if (*answeredBy) {
+      const VoiceBackend actual = strcmp(answeredBy, "muse") == 0 ? VoiceBackend::Muse : VoiceBackend::Hermes;
+      if (actual != voiceBackend()) {
+        LOG_ERR("AVA", "answered by %s but this device had %s selected; correcting", answeredBy,
+                voiceBackendWireName(voiceBackend()));
+        setVoiceBackend(actual);
+        view_.setBackendMark(actual == VoiceBackend::Muse ? 'M' : 'H');
+        view_.markFullPaint();
+      }
+    }
+    LOG_INF("AVA", "answer.done answerLen=%u backend=%s", (unsigned)answer_.length(), *answeredBy ? answeredBy : "-");
     finishAnswer();
   } else if (!strcmp(t, "error")) {
     LOG_ERR("AVA", "server error: %s", static_cast<const char*>(doc["message"] | ""));
