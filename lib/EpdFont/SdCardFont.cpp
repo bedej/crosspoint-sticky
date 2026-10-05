@@ -3,6 +3,8 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Utf8.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #include <algorithm>
 #include <climits>
@@ -17,6 +19,24 @@ static_assert(sizeof(EpdKernClassEntry) == 3, "EpdKernClassEntry must be 3 bytes
 static_assert(sizeof(EpdLigaturePair) == 8, "EpdLigaturePair must be 8 bytes to match .cpfont file layout");
 
 namespace {
+
+// One font can be measured on an activity task while the render task draws it
+// (the voice screen does both), and a miss holds its ring slot across blocking
+// SD reads. Unserialised, two misses pick the same slot and free its bitmap
+// twice.
+class OverflowGuard {
+ public:
+  OverflowGuard() { xSemaphoreTake(mutex(), portMAX_DELAY); }
+  ~OverflowGuard() { xSemaphoreGive(mutex()); }
+  OverflowGuard(const OverflowGuard&) = delete;
+  OverflowGuard& operator=(const OverflowGuard&) = delete;
+
+ private:
+  static SemaphoreHandle_t mutex() {
+    static SemaphoreHandle_t m = xSemaphoreCreateMutex();
+    return m;
+  }
+};
 
 // FNV-1a hash for content-based font ID generation
 constexpr uint32_t FNV_OFFSET = 2166136261u;
@@ -210,6 +230,7 @@ void SdCardFont::freeAll() {
 }
 
 void SdCardFont::clearOverflow() {
+  OverflowGuard guard;
   for (uint32_t i = 0; i < overflowCount_; i++) {
     delete[] overflow_[i].bitmap;
     overflow_[i].bitmap = nullptr;
@@ -1599,6 +1620,7 @@ const EpdGlyph* SdCardFont::onGlyphMiss(void* ctx, uint32_t codepoint) {
   const auto& s = self->styles_[styleIdx];
   if (!s.fullIntervals && !s.bmpIntervals) return nullptr;
 
+  OverflowGuard guard;
   // Check overflow cache first (matching both codepoint and style)
   for (uint32_t i = 0; i < self->overflowCount_; i++) {
     if (self->overflow_[i].codepoint == codepoint && self->overflow_[i].styleIdx == styleIdx) {

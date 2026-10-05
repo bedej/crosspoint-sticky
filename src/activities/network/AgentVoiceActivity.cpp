@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <BoardConfig.h>
+#include <FontCacheManager.h>
 #include <HalClock.h>
 #include <HalStorage.h>
 #include <Logging.h>
@@ -466,8 +467,33 @@ void AgentVoiceActivity::stopListening() {
 // describes a layout that is no longer true; change none of them and a re-flow
 // is pure cost.
 void AgentVoiceActivity::beginView() {
+  // The render task draws with this font, so swapping the family or rebuilding
+  // its glyph tables must not happen under a render in progress.
+  RenderLock lock;
   sdFontSystem.ensureLoadedFor(renderer, SETTINGS.conversationSdFamily(), SETTINGS.conversationPointSize());
+  prewarmConversationFont();
   view_.begin();
+}
+
+// An SD font with nothing resident faults every glyph through an 8-slot ring,
+// one SD read each, on every measure and every draw. The reader prewarms each
+// page; a conversation's text is not known in advance, so warm the characters
+// it is made of once: regular for answers, bold for questions, italic for the
+// live transcript.
+void AgentVoiceActivity::prewarmConversationFont() {
+  if (SETTINGS.conversationSdFamily()[0] == '\0') return;
+  auto* fcm = renderer.getFontCacheManager();
+  if (!fcm) return;
+  static constexpr char kCharset[] =
+      " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+      "\u2018\u2019\u201C\u201D\u2013\u2014\u2026\u2022\u00B0\u00B7\u00D7\u00F7\u00B1\u00BD\u00BC\u00BE"
+      "\u20AC\u00A3\u00A9\u00AE\u2122\u00A7\u2192\u2190\u00E9\u00E8\u00E0\u00E7\u00F1\u00FC\u00F6"
+      "\u00E4\u00ED\u00F3\u00FA\u00E1\u00EA\u00EF";
+  const uint32_t before = ESP.getFreeHeap();
+  const unsigned long started = millis();
+  fcm->prewarmCache(SETTINGS.getConversationFontId(), kCharset, 0x07);
+  LOG_INF("AVA", "conversation font prewarmed in %lums, heap %u -> %u", millis() - started,
+          static_cast<unsigned>(before), static_cast<unsigned>(ESP.getFreeHeap()));
 }
 
 uint32_t AgentVoiceActivity::textLayoutSignature() const {

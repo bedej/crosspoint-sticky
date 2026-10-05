@@ -146,6 +146,7 @@ class AgentVoiceActivity : public Activity {
   void pumpInjectedTurns();
   // The conversation font is the screen's own: make it resident, then lay out.
   void beginView();
+  void prewarmConversationFont();
   enum class State { Connecting, Idle, Listening, Answering, Error };
 
   bool loadConfig();      // token/host/port from /.crosspoint/voice.json (SD)
