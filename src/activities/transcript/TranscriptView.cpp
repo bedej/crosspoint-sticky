@@ -240,6 +240,12 @@ void TranscriptView::endTurn() {
     if (spool_.readTurnAt(liveTurnOffset_, liveTurnIndex_, turn)) {
       spool_.appendTurnRef(turn);
       liveTurnRefd_ = true;
+    } else {
+      // Say so. This failing is how a whole session lost its turn table — the
+      // rail and the picker read from it — and because it failed silently the
+      // only symptom was a picker that sorted oddly, days later.
+      LOG_ERR("TVIEW", "turn %u at %u not readable back; no rail entry", static_cast<unsigned>(liveTurnIndex_),
+              static_cast<unsigned>(liveTurnOffset_));
     }
   }
   // A completed turn is a clean boundary, and this is what spares the next boot
@@ -344,7 +350,17 @@ void TranscriptView::rebuildIndexFrom(const uint32_t offset, const uint16_t turn
   uint16_t index = turnIndex;
   while (cursor < spool_.size()) {
     ConversationSpool::Turn turn;
-    if (!spool_.readTurnAt(cursor, index, turn)) break;
+    if (!spool_.readTurnAt(cursor, index, turn)) {
+      // Step over a record this walk cannot use instead of ending the scan on
+      // it. Stopping here truncated the index at the first such record, and
+      // since every full rebuild starts at offset 0 and a conversation now
+      // opens with a metadata line, that meant rebuilding one produced an
+      // EMPTY index — no turns, no pages — while scan() went on counting the
+      // turns correctly. nextOffset is where to resume; no progress means EOF.
+      if (turn.nextOffset <= cursor) break;
+      cursor = turn.nextOffset;
+      continue;  // not a turn, so the turn index does not advance
+    }
     liveRole_ = turn.role;
     liveTurnOffset_ = turn.offset;
     liveTurnIndex_ = index;

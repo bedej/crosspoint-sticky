@@ -116,7 +116,6 @@ bool ConversationSpool::startNewSession() {
   }
   f.close();
   Storage.writeFile(kCurrentPath, String(sessionId_.c_str()));
-  writeSessionMeta();
 
   open_ = true;
   agentTurnOpen_ = false;
@@ -126,6 +125,16 @@ bool ConversationSpool::startNewSession() {
   lastTurnEpoch_ = 0;
   pages_.clear();
   turns_.clear();
+
+  // AFTER the counters reset, not before. Called earlier it did one of two
+  // wrong things depending on the previous session's state: with open_ still
+  // true it wrote the line and then had its size_ += wrote discarded by the
+  // size_ = 0 above, leaving every later turn's recorded offset short by the
+  // length of this line — so readTurnAt landed mid-record, no TurnRef was ever
+  // appended, and the conversation lost its turn table. With open_ false it
+  // wrote nothing at all, and the conversation had no agent recorded.
+  writeSessionMeta();
+
   LOG_INF("SPOOL", "new session %s", sessionId_.c_str());
   return true;
 }
@@ -305,6 +314,12 @@ uint32_t ConversationSpool::readLine(const uint32_t offset, std::string& line) c
   return line.empty() ? 0 : pos;
 }
 
+bool ConversationSpool::isMetaRecord(const std::string& line) {
+  // Cheap enough to run per line, and deliberately not a full parse: this is
+  // called while walking a conversation.
+  return line.find("\"r\":\"m\"") != std::string::npos;
+}
+
 bool ConversationSpool::parseRecord(const std::string& line, Role& role, bool& continuation, uint32_t& epoch,
                                     std::string& text) {
   if (line.empty() || line[0] != '{') return false;
@@ -338,8 +353,28 @@ bool ConversationSpool::readTurnAt(const uint32_t offset, const uint16_t index, 
   if (!open_ || offset >= size_) return false;
 
   std::string line;
-  uint32_t pos = readLine(offset, line);
+  uint32_t start = offset;
+  uint32_t pos = readLine(start, line);
   if (pos == 0) return false;
+  // Even on the failure paths below, nextOffset points past the record we could
+  // not use, so a caller walking the conversation can step over it and carry on
+  // rather than treating one bad line as the end of the file.
+  out.nextOffset = pos;
+
+  // A conversation begins with a metadata record naming its agent. That is not
+  // a turn, so step over it — failing here instead made the whole conversation
+  // unreadable, because every walk starts at offset 0 and this is the only
+  // reader that fails closed rather than skipping what it cannot parse. The
+  // symptom was a conversation that laid out empty: no turns, no first
+  // question, no timestamp, and a picker row with no title or age.
+  while (isMetaRecord(line)) {
+    start = pos;
+    if (start >= size_) return false;  // metadata and nothing after it yet
+    pos = readLine(start, line);
+    if (pos == 0) return false;
+    out.nextOffset = pos;
+  }
+  out.offset = start;
 
   Role role = Role::Agent;
   bool continuation = false;
@@ -356,6 +391,15 @@ bool ConversationSpool::readTurnAt(const uint32_t offset, const uint16_t index, 
     while (pos < size_) {
       const uint32_t next = readLine(pos, line);
       if (next == 0) break;
+      // Metadata is not a turn boundary. Today it only ever sits at the head of
+      // a file, but a reader that ends an agent turn on one would silently
+      // truncate the reply the day anything writes a second metadata record —
+      // which is exactly how the head-of-file case got here.
+      if (isMetaRecord(line)) {
+        pos = next;
+        out.nextOffset = pos;
+        continue;
+      }
       Role r2 = Role::Agent;
       bool cont2 = false;
       uint32_t e2 = 0;

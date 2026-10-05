@@ -186,6 +186,8 @@ class ConversationSpool {
   bool appendRecord(Role role, bool continuation, const std::string& text);
   // Head-of-file record naming the agent; written once, at session creation.
   bool writeSessionMeta();
+  // True for the head-of-conversation metadata line, which readers step over.
+  static bool isMetaRecord(const std::string& line);
   static void appendJsonEscaped(std::string& out, const std::string& in);
   // Read one raw line starting at `offset`. Returns the offset just past its
   // newline, or 0 on EOF/error.
