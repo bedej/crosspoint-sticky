@@ -139,7 +139,7 @@ class AgentVoiceActivity : public Activity {
   static inline volatile uint8_t fontPointSize_ = 0;
   static inline volatile bool fontRequested_ = false;
   static inline volatile bool keepAwake_ = false;
-  static inline volatile uint8_t styleGapPct_ = 67;
+  static inline volatile uint8_t styleGapPct_ = 50;
   static inline volatile uint8_t styleCue_ = 0;
   static inline volatile bool styleRequested_ = false;
   static inline volatile bool pickerRequested_ = false;

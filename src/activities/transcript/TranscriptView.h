@@ -263,7 +263,7 @@ class TranscriptView {
   int bodyHeight_ = 0;
   int gapPx_ = 0;
   uint16_t linesPerPage_ = 0;  // nominal: text lines only, for the spec and ready()
-  static inline uint8_t gapPct_ = 67;
+  static inline uint8_t gapPct_ = 50;
   static inline Cue cue_ = Cue::Bold;
 
   // chrome
