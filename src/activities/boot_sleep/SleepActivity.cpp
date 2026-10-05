@@ -26,7 +26,7 @@
 #include "activities/reader/ReaderUtils.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
-#include "images/Logo120.h"
+#include "images/Faraday200.h"
 #include "images/MoonIcon.h"
 
 namespace {
@@ -597,14 +597,19 @@ void SleepActivity::renderDefaultSleepScreen() const {
   const auto pageHeight = renderer.getScreenHeight();
 
   renderer.clearScreen();
-  renderer.drawImage(Logo120, (pageWidth - 120) / 2, (pageHeight - 120) / 2, 120, 120);
-  renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 70, tr(STR_CROSSPOINT), true, EpdFontFamily::BOLD);
-  renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 95, tr(STR_SLEEPING));
+  // Faraday rather than the CrossPoint mark: this screen is the device's resting
+  // face and stays on the panel for hours. The boot splash keeps the mark.
+  renderer.drawImage(Faraday200, (pageWidth - 200) / 2, (pageHeight - 200) / 2, 200, 200);
+  // Clear of the art: at 200px the image reaches pageHeight/2 + 100, where the
+  // name used to sit.
+  renderer.drawCenteredText(UI_10_FONT_ID, pageHeight / 2 + 120, tr(STR_FARADAY), true, EpdFontFamily::BOLD);
+  renderer.drawCenteredText(SMALL_FONT_ID, pageHeight / 2 + 145, tr(STR_SLEEPING));
 
-  // Make sleep screen dark unless light is selected in settings
-  if (SETTINGS.sleepScreen != CrossPointSettings::SLEEP_SCREEN_MODE::LIGHT) {
-    renderer.invertScreen();
-  }
+  // Deliberately NOT inverted, unlike the rest of the sleep modes. The art is
+  // dithered and tonally directional — the fur reads as fur only in positive,
+  // and inverted it becomes a photographic negative. The flat mark this
+  // replaced looked the same either way, which is why the inversion was safe
+  // before. A custom sleep bitmap still follows the dark/light setting below.
 
   renderer.displayBuffer(HalDisplay::HALF_REFRESH);
 }
