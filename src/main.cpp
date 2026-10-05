@@ -264,6 +264,7 @@ static bool loadSleepFrameBuffer() {
 void enterDeepSleep(bool fromTimeout = false) {
   HalPowerManager::Lock powerLock;  // Ensure we are at normal CPU frequency for sleep preparation
   APP_STATE.lastSleepFromReader = activityManager.isReaderActivity();
+  APP_STATE.lastSleepFromVoice = AgentVoiceActivity::isActive();
 
   const bool isQuickResumeSleep =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -566,6 +567,13 @@ void setup() {
     // through to the sleep-wake "resume reader" logic, which fires on stale
     // openEpubPath + lastSleepFromReader from a prior session.
     activityManager.goHome();
+  } else if (APP_STATE.lastSleepFromVoice && !mappedInputManager.isPressed(MappedInputManager::Button::Back)) {
+    // Sleeping from the voice screen resumes it, the way sleeping from the
+    // reader resumes the book. Waking into the main menu lost whichever
+    // conversation was in progress; the spool reopens the last session, so the
+    // turns come back with it. Back held still escapes to home, matching the
+    // reader's own escape hatch for a screen that will not load.
+    activityManager.goToVoice();
   } else if (APP_STATE.openEpubPath.empty() || !APP_STATE.lastSleepFromReader ||
              mappedInputManager.isPressed(MappedInputManager::Button::Back) || APP_STATE.readerActivityLoadCount > 0) {
     // Boot to home screen if no book is open, last sleep was not from reader, back button is held, or reader activity

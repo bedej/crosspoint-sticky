@@ -80,10 +80,12 @@ void VoiceMenuActivity::onEnter() {
   }
 
   rebuildRowItems();
+  LOG_INF("CONN", "menu onEnter: tab=%d rows=%d", static_cast<int>(tab_), listCount());
   requestUpdate(true);
 }
 
 void VoiceMenuActivity::onExit() {
+  LOG_INF("CONN", "menu onExit (painted=%d)", (int)painted_);
   if (startedPeripheral_) {
     VoiceRelayPeripheral::instance().end();
     startedPeripheral_ = false;
@@ -423,6 +425,7 @@ bool VoiceMenuActivity::handleCustomInput() { return optionPopup_.isActive(); }
 bool VoiceMenuActivity::handleButtons() {
   if (optionPopup_.isActive()) return false;  // the popup owns input while it is up
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
+    LOG_INF("CONN", "menu closing: Back released");
     finish();
     return true;
   }
@@ -496,6 +499,10 @@ void VoiceMenuActivity::buildScreen(UiScreen& screen) {
 void VoiceMenuActivity::render(RenderLock&&) {
   if (optionPopup_.processRender(renderer, mappedInput)) return;  // picker draws over everything
 
+  if (!painted_) {
+    painted_ = true;
+    LOG_INF("CONN", "menu first paint");
+  }
   renderer.clearScreen();
 
   GUI.drawHeader(renderer, Rect{0, metrics_.topPadding, renderer.getScreenWidth(), metrics_.headerHeight},
@@ -507,4 +514,13 @@ void VoiceMenuActivity::render(RenderLock&&) {
     const int y = renderer.getScreenHeight() - bottomReserved;
     renderer.drawText(UI_10_FONT_ID, metrics_.topPadding, y, note_.c_str());
   }
+
+  const auto labels = mappedInput.mapLabels(tr(STR_BACK), tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+
+  // Push the framebuffer to the panel. Without this the screen drew correctly
+  // and was never shown: every other activity ends its render the same way, and
+  // a screenshot reads the framebuffer rather than the panel, so the capture
+  // looked right while the device still displayed the previous screen.
+  renderer.displayBuffer();
 }

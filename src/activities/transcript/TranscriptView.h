@@ -61,9 +61,13 @@ class TranscriptView {
   // phone is linked, so the indicator has to say which one is carrying the
   // conversation rather than implying there is only ever one.
   enum class Transport : uint8_t { Wifi, Ble };
-  void setTransport(Transport transport);
+  // Both return true when the value actually changed. Marking the view dirty is
+  // not enough on e-paper: without a repaint request the panel holds the old
+  // frame, so the status bar goes on naming an agent or a transport that is no
+  // longer the one that will carry the next turn.
+  bool setTransport(Transport transport);
   // A single letter beside the link glyph naming the agent, or '\0' for none.
-  void setBackendMark(char mark);
+  bool setBackendMark(char mark);
   // Capture state, shown as a filled dot beside the status. Without it there is
   // no way to tell a live mic from a dead one.
   void setListening(bool listening);
@@ -196,6 +200,7 @@ class TranscriptView {
   void drawHeader() const;
   // Returns the width it occupied, so the status text knows where to stop.
   int drawLinkIndicator(int right, int top) const;
+  int drawSignalBars(int right, int top) const;
   int drawBluetoothGlyph(int right, int top) const;
   void drawLine(size_t index) const;
   void drawFooter() const;

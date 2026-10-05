@@ -84,10 +84,15 @@ void AgentVoiceActivity::updateTransportIndicator() {
   // carry a turn, so a phone linking while idle is visible before you speak.
   Transport shown = turnTransport_;
   if (shown == Transport::None) shown = chooseTransport();
-  view_.setTransport(shown == Transport::Ble ? TranscriptView::Transport::Ble : TranscriptView::Transport::Wifi);
+  bool changed =
+      view_.setTransport(shown == Transport::Ble ? TranscriptView::Transport::Ble : TranscriptView::Transport::Wifi);
   // Mark only the non-default agent: a letter on every screen to say "Hermes"
   // would be chrome rather than information.
-  view_.setBackendMark(voiceBackend() == VoiceBackend::Muse ? 'M' : '\0');
+  changed |= view_.setBackendMark(voiceBackend() == VoiceBackend::Muse ? 'M' : 'H');
+  // Repaint when either changes. Without this the panel kept the previous frame
+  // and the header went on naming the old agent — the screen said M while the
+  // turn went, correctly, to Hermes.
+  if (changed) requestUpdate();
 }
 
 bool AgentVoiceActivity::sendAudio(const int16_t* pcm, const size_t count) {
@@ -265,6 +270,7 @@ bool AgentVoiceActivity::loadConfig() {
 void AgentVoiceActivity::onEnter() {
   Activity::onEnter();
   g_voiceInstance = this;
+  instanceAlive_ = true;
   // Build marker — grep this in serial to confirm which binary is actually running.
   LOG_INF("AVA", "voice build: usb-pin-fix (mic on 19/20, no native USB)");
 
@@ -338,6 +344,7 @@ void AgentVoiceActivity::onExit() {
   releasePcmBuffer();
   WiFi.disconnect(false);
   g_voiceInstance = nullptr;
+  instanceAlive_ = false;
   Activity::onExit();
 }
 
@@ -408,7 +415,9 @@ void AgentVoiceActivity::startListening() {
   bytesSent_ = 0;
   framesDropped_ = 0;
   state_ = State::Listening;
-  status_ = "Listening... (Up to stop)";
+  // Same button that started it: talk is bound to Confirm/Power on GPIO4, and Up
+  // has never stopped a turn. The label said otherwise from the first version.
+  status_ = "Listening... (Power to stop)";
   LOG_INF("AVA", "listen start (ws=%d)", (int)wsConnected_);
   markDirty();
 }
@@ -488,6 +497,7 @@ void AgentVoiceActivity::openVoiceMenu() {
   view_.endTurn();  // never leave a half-laid-out turn behind
   spool_.endAgentTurn();
   view_.clearDraft();
+  view_.closeRail();
 
   const uint32_t before = textLayoutSignature();
   LOG_INF("AVA", "voice menu: pushing (sig=%08x)", static_cast<unsigned>(before));
@@ -520,6 +530,14 @@ void AgentVoiceActivity::openVoiceMenu() {
 // so the caller does not also page.
 bool AgentVoiceActivity::handleRailInput() {
   if (!view_.railOpen()) return false;
+
+  // The rail paints the panel itself — closing restores a snapshot, scrolling
+  // redraws — and that happens on the activity task. Without the render lock it
+  // races the render task for the panel bus, and the loser waits out the
+  // driver's 30-second refresh-done timeout: one 30,047 ms loop, the device
+  // apparently dead to every gesture, exactly as Bede saw. The reader takes the
+  // same lock wherever it drives the panel from its own loop.
+  RenderLock lock;
 
   // The same edge gesture closes it — symmetry beats having to find the outside.
   if (mappedInput.wasRightEdgeGesture()) {
@@ -590,6 +608,7 @@ void AgentVoiceActivity::openConversations() {
   view_.endTurn();
   spool_.endAgentTurn();
   view_.clearDraft();
+  view_.closeRail();  // never return to a screen whose overlay eats every gesture
 
   startActivityForResult(std::make_unique<ConversationPickerActivity>(renderer, mappedInput, spool_.sessionId()),
                          [this](const ActivityResult& result) {
@@ -634,8 +653,27 @@ void AgentVoiceActivity::performPendingWork() {
   pending_ = Pending::None;
 
   if (work == Pending::Session) {
-    const bool ok = pendingSessionId_.empty() ? spool_.startNewSession() : spool_.begin(pendingSessionId_.c_str());
+    const bool resuming = !pendingSessionId_.empty();
+    const bool ok = resuming ? spool_.begin(pendingSessionId_.c_str()) : spool_.startNewSession();
     if (!ok) LOG_ERR("AVA", "could not open session '%s'", pendingSessionId_.c_str());
+
+    // Follow the conversation's own agent. A thread belongs to whoever has been
+    // answering it: carrying the previous selection in would send the next turn
+    // to an agent that has never seen any of it, and file the reply in a
+    // conversation whose record names someone else. A new conversation keeps the
+    // current choice — it is what the metadata record will be written with — and
+    // a conversation from before agents were recorded names nobody, so there is
+    // nothing to follow and the selection stands.
+    if (resuming) {
+      const std::string agent = ConversationSpool::sessionBackend(spool_.sessionId());
+      if (!agent.empty()) {
+        const VoiceBackend want = agent == "muse" ? VoiceBackend::Muse : VoiceBackend::Hermes;
+        if (want != voiceBackend()) {
+          LOG_INF("AVA", "conversation %s is a %s thread; switching agent", spool_.sessionId().c_str(), agent.c_str());
+          setVoiceBackend(want);  // loop context, never a render path: this writes NVS
+        }
+      }
+    }
     pendingSessionId_.clear();
   }
 
@@ -643,6 +681,13 @@ void AgentVoiceActivity::performPendingWork() {
   // spool is raw text and is untouched either way.
   view_.begin();
   view_.restoreIndex();
+  // Set the letter outright rather than clearing it and waiting for the next
+  // poll to notice: begin() resets the view's status-bar state, and the
+  // indicator only re-asserts a value that CHANGED, so the repaint below landed
+  // with no letter and the correct one appeared only if something later
+  // happened to change it. The agent is known here — draw it.
+  view_.setBackendMark(voiceBackend() == VoiceBackend::Muse ? 'M' : 'H');
+  view_.markFullPaint();
   view_.jumpToLatest();
   LOG_INF("AVA", "session %s: %u turns, %u pages", spool_.sessionId().c_str(),
           static_cast<unsigned>(spool_.turnCount()), static_cast<unsigned>(spool_.pageCount()));
@@ -667,12 +712,45 @@ void AgentVoiceActivity::maybeRotateSession() {
 }
 
 void AgentVoiceActivity::handlePaging() {
+  // Touch cannot be injected over serial, so every gesture this screen can see
+  // is logged once, in the order it is tested. Without this a gesture that is
+  // detected but swallowed by an earlier branch is indistinguishable from one
+  // the panel never reported — which is exactly the ambiguity that made the
+  // menu swipe look dead.
+  {
+    int tx = 0, ty = 0;
+    const auto swipe = mappedInput.wasSwipe();
+    const bool tapped = mappedInput.wasScreenTapped(tx, ty);
+    if (swipe != MappedInputManager::SwipeDir::None || tapped || mappedInput.wasBackGesture() ||
+        mappedInput.wasRightEdgeGesture() || mappedInput.wasMenuGesture()) {
+      LOG_INF("AVA", "touch: swipe=%d tap=%d(%d,%d) back=%d rightEdge=%d menu=%d rail=%d state=%d",
+              static_cast<int>(swipe), (int)tapped, tx, ty, (int)mappedInput.wasBackGesture(),
+              (int)mappedInput.wasRightEdgeGesture(), (int)mappedInput.wasMenuGesture(), (int)view_.railOpen(),
+              (int)state_);
+    }
+  }
+
+  // Navigation gestures outrank the rail. The rail is an overlay, not a modal,
+  // but handleRailInput() swallowed everything it did not use — so with the rail
+  // open (and the panel not necessarily showing it) the menu swipe scrolled the
+  // rail, the left edge did nothing, and the screen looked wedged with no way to
+  // discover why. These close it and carry on to their own handler.
+  if (view_.railOpen() && (mappedInput.wasBackGesture() || mappedInput.wasMenuGesture())) {
+    LOG_INF("AVA", "touch: closing the rail for a navigation gesture");
+    {
+      RenderLock lock;  // closeRail restores the snapshot and refreshes
+      view_.closeRail();
+    }
+    requestUpdate();
+  }
+
   if (handleRailInput()) return;
 
   // Both edge gestures are checked before ReaderUtils sees the swipe: an edge
   // swipe is ALSO a plain SwipeDir, and in swipe-paging mode the page turn would
   // otherwise swallow it.
   if (mappedInput.wasRightEdgeGesture()) {
+    RenderLock lock;  // openRail snapshots the page and refreshes the panel itself
     view_.openRail();
     return;
   }
@@ -683,12 +761,16 @@ void AgentVoiceActivity::handlePaging() {
     openConversations();
     return;
   }
-  if (handleTopBarTap()) return;
-
+  // The menu gesture is tested BEFORE the top bar. A downward swipe that starts
+  // on the top bar also reads as a tap there, so checking the bar first ate the
+  // swipe and opened the conversations instead of the menu.
   if (ReaderUtils::isTouchMenuGesture(renderer, mappedInput)) {
+    LOG_INF("AVA", "touch: menu gesture -> voice menu");
     openVoiceMenu();
     return;
   }
+
+  if (handleTopBarTap()) return;
 
   // Touch only. ReaderUtils::detectPageTurn is deliberately NOT used here:
   // MappedInputManager maps PageBack/PageForward onto BTN_UP/BTN_DOWN, the same

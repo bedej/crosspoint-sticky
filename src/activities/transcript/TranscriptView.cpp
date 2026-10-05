@@ -99,16 +99,18 @@ void TranscriptView::setListening(const bool listening) {
   fullPaint_ = true;
 }
 
-void TranscriptView::setBackendMark(const char mark) {
-  if (backendMark_ == mark) return;
+bool TranscriptView::setBackendMark(const char mark) {
+  if (backendMark_ == mark) return false;
   backendMark_ = mark;
   fullPaint_ = true;  // same as the transport glyph: the status bar changed
+  return true;
 }
 
-void TranscriptView::setTransport(const Transport transport) {
-  if (transport_ == transport) return;
+bool TranscriptView::setTransport(const Transport transport) {
+  if (transport_ == transport) return false;
   transport_ = transport;
   fullPaint_ = true;
+  return true;
 }
 
 void TranscriptView::setStatus(const std::string& text) {
@@ -814,11 +816,17 @@ int TranscriptView::drawBluetoothGlyph(const int right, const int top) const {
 }
 
 int TranscriptView::drawLinkIndicator(const int right, const int top) const {
+  int used = 0;
   if (transport_ == Transport::Ble) {
-    // A linked phone is carrying the turn, so the Wi-Fi state is irrelevant —
-    // showing bars here would describe a path nothing is using.
-    return drawBluetoothGlyph(right, top);
+    // Bluetooth is carrying the turn, but the Wi-Fi state still matters to
+    // someone deciding whether to walk out of the house — so show the phone
+    // glyph AND the bars, rather than replacing one with the other.
+    used = drawBluetoothGlyph(right, top) + 4;
   }
+  return used + drawSignalBars(right - used, top);
+}
+
+int TranscriptView::drawSignalBars(const int right, const int top) const {
   constexpr int kBars = 3;
   constexpr int kBarW = 4;
   constexpr int kGap = 2;
@@ -869,10 +877,10 @@ void TranscriptView::drawHeader() const {
   }
   int indicatorW = drawLinkIndicator(w - kEdge, kEdge);
 
-  // One letter for the agent that will answer, beside the link glyph, so you can
-  // see who you are about to talk to before you talk (HomeLab-cuq). Drawn only
-  // for Muse: Hermes is the default and marking it would put a letter on every
-  // screen to say "normal".
+  // One letter for the agent that will answer, to the left of the link glyphs so
+  // the three never collide: agent, transport, signal, all legible at once.
+  // Always drawn — H as well as M — because "no letter" is indistinguishable
+  // from a status bar that simply has not repainted.
   if (backendMark_ != '\0') {
     const char mark[2] = {backendMark_, '\0'};
     const int markW = renderer_.getTextWidth(UI_10_FONT_ID, mark);

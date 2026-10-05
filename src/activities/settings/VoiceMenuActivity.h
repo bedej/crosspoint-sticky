@@ -86,6 +86,7 @@ class VoiceMenuActivity final : public UiTabListActivity {
   uint32_t pairingOpenedMs_ = 0;
   // Whether THIS screen started the peripheral, and so owes it an end().
   bool startedPeripheral_ = false;
+  bool painted_ = false;  // did this screen ever reach the panel
   // Value pickers, same component the reader's layout rows use.
   OptionPopup optionPopup_;
 

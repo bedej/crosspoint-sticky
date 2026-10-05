@@ -31,6 +31,7 @@ class AgentVoiceActivity : public Activity {
   ~AgentVoiceActivity() override;
 
   void onEnter() override;
+
   void onExit() override;
   void loop() override;
 
@@ -63,6 +64,13 @@ class AgentVoiceActivity : public Activity {
   static void requestRailRow(int row) { railRowRequested_ = row; }
   static void requestNewConversation() { newConversationRequested_ = true; }
   static void requestSessionList() { sessionListRequested_ = true; }
+  // True while this screen is alive, including when one of its own sub-screens
+  // (the menu, the conversation list) sits on top of it — those push rather
+  // than replace, so this activity is not exited. Deliberately a static flag
+  // rather than a virtual on Activity: adding one there shifts every later
+  // vtable slot in every screen, which is a wide blast radius for a question
+  // only this screen can answer.
+  static bool isActive() { return instanceAlive_; }
   // Test hooks for conversation recovery (HomeLab-wni/g7t): open a conversation
   // by id, and force the full re-flow that a render-spec change triggers, which
   // is what rebuilds a damaged index.
@@ -106,6 +114,7 @@ class AgentVoiceActivity : public Activity {
   static inline volatile int railRowRequested_ = -1;
   static inline volatile bool newConversationRequested_ = false;
   static inline volatile bool sessionListRequested_ = false;
+  static inline volatile bool instanceAlive_ = false;
   static inline volatile bool openConversationRequested_ = false;
   static inline std::string openConversationId_;
   static inline volatile bool reflowRequested_ = false;
