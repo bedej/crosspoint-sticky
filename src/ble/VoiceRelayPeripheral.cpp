@@ -269,7 +269,14 @@ bool VoiceRelayPeripheral::supported() { return true; }
 
 bool VoiceRelayPeripheral::begin(const char* deviceName) {
   auto& s = st();
-  if (s.server) return true;
+  if (s.server) {
+    // Already up from a previous visit to the voice screen: the stack is never
+    // torn down (see end()), so resuming means advertising again rather than
+    // re-initialising.
+    NimBLEDevice::startAdvertising();
+    LOG_INF("BLE", "voice relay advertising again");
+    return true;
+  }
 
   if (!NimBLEDevice::init(deviceName ? deviceName : "Sticky")) {
     LOG_ERR("BLE", "NimBLEDevice::init failed");
@@ -324,13 +331,24 @@ bool VoiceRelayPeripheral::begin(const char* deviceName) {
 void VoiceRelayPeripheral::end() {
   auto& s = st();
   if (!s.server) return;
+  // Stop advertising, but do NOT deinit the host.
+  //
+  // NimBLEDevice::deinit() deletes the host task and frees the server and its
+  // callback objects. Called from the UI task — which is where every activity
+  // teardown runs — it can do that while the host is dispatching an event, and
+  // the host then calls through a freed pointer: PC=0, InstrFetchProhibited,
+  // with esp_cleanup_r on the stack because the task is being deleted beneath
+  // it. That is the crash Bede hit by swiping up from the voice menu, which is
+  // a HOME gesture: it unwinds the whole stack, so the voice screen exits too
+  // and this runs. Popping just the menu never reached here, which is why it
+  // would not reproduce.
+  //
+  // The stack costs idle power to leave up; it does not cost correctness. Audio
+  // cannot flow regardless — streaming is gated on a subscription and a turn.
   NimBLEDevice::stopAdvertising();
-  NimBLEDevice::deinit(true);
-  s.server = nullptr;
-  s.audioUp = s.control = s.answerDown = nullptr;
   std::lock_guard<std::mutex> lk(s.mtx);
-  s.connected = s.streaming = false;
-  LOG_INF("BLE", "voice relay stopped");
+  s.streaming = false;
+  LOG_INF("BLE", "voice relay advertising stopped (host stays up)");
 }
 
 bool VoiceRelayPeripheral::isRunning() const { return st().server != nullptr; }
