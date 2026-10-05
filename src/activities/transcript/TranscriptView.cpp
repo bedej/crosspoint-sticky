@@ -25,7 +25,7 @@ CssTextAlign toCssAlign(const uint8_t align) {
 // The user's turn is the ASR transcript, so it is marked as quoted material
 // rather than left to look like something the agent said.
 constexpr char kUserMarker[] = ">";
-constexpr char kHangMarker[] = "> ";
+constexpr char kHangMarker[] = ">";
 // Cue::Label. Study-only: a shipped label goes through tr().
 constexpr char kUserLabel[] = "You:";
 // Cue::Box: padding between the hairline and the text.
@@ -185,7 +185,7 @@ int TranscriptView::indentFor(const Role role) const {
     case Cue::Right:
       return textWidth_ / 5;
     case Cue::Hang:
-      return renderer_.getTextWidth(fontId_, kHangMarker);
+      return renderer_.getTextAdvanceX(fontId_, kHangMarker, EpdFontFamily::REGULAR) + renderer_.getSpaceWidth(fontId_);
     case Cue::Box:
       return kBoxPad;
     default:
