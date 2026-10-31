@@ -1,6 +1,8 @@
 # Sticky voice mode (AgentVoiceActivity)
 
 Push-to-talk voice for the reTerminal Sticky, talking to the homelab `voice` service.
+The whole system, including the iPhone relay, the blackbox services and both agents
+(Hermes and Muse), is in [STICKY_ARCHITECTURE.md](STICKY_ARCHITECTURE.md).
 
 ```
 AI-Voice button ─▶ PDM mic (freeink::Microphone, 16 kHz) ─▶ WebSocket (binary frames)
