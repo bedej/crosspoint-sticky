@@ -13,6 +13,7 @@ VoiceRelayPeripheral& VoiceRelayPeripheral::instance() {
 #include <Preferences.h>
 
 #include <cstring>
+#include <deque>
 #include <mutex>
 
 namespace {
@@ -27,6 +28,10 @@ constexpr char kAnswerDownUuid[] = "A684CBCC-ED6F-4E9F-94F0-E0254BA8FB42";
 // is 167 bytes, which fits even the 23-byte-MTU worst case after fragmentation
 // is not available for audio — so the encoder's frame size is the contract.
 constexpr size_t kMaxAnswerBuffer = 4096;
+// A whole answer is a few hundred bytes per frame and tens of frames; this is
+// several answers' worth of slack. Overflow drops the OLDEST and says so,
+// because a silent drop here is what the single slot was already doing.
+constexpr size_t kMaxAnswerQueueBytes = 32768;
 
 struct State {
   NimBLEServer* server = nullptr;
@@ -44,7 +49,14 @@ struct State {
   bool pairingOpen = false;
   uint16_t seq = 0;
   std::string answerPartial;  // fragments accumulating
-  std::string answerReady;    // one complete object, waiting for the app
+  // Completed frames waiting for the app. A QUEUE, not a slot: the phone writes
+  // answer.delta frames every 20-30 ms, and the loop that drains them also
+  // renders, so a single slot silently overwrote whichever frame arrived while
+  // the previous one was still waiting. That cost words mid-answer, and when the
+  // frame lost was answer.done the turn never completed — the screen said no
+  // response for an answer Muse had given in full.
+  std::deque<std::string> answerReady;
+  size_t answerQueuedBytes = 0;
   std::string linkState = "—";
 };
 
@@ -154,6 +166,8 @@ class ServerCallbacks : public NimBLEServerCallbacks {
       st().bonded = false;
       st().linkState = "—";
       st().answerPartial.clear();
+      st().answerReady.clear();
+      st().answerQueuedBytes = 0;
     }
     LOG_INF("BLE", "central disconnected (reason=%d), advertising again", reason);
     NimBLEDevice::startAdvertising();
@@ -244,8 +258,14 @@ class InboundCallbacks : public NimBLECharacteristicCallbacks {
       }
       st().answerPartial.append(value, 1, std::string::npos);
       if (flag == 1) {
-        st().answerReady.swap(st().answerPartial);
+        st().answerQueuedBytes += st().answerPartial.size();
+        st().answerReady.push_back(std::move(st().answerPartial));
         st().answerPartial.clear();
+        while (st().answerQueuedBytes > kMaxAnswerQueueBytes && !st().answerReady.empty()) {
+          st().answerQueuedBytes -= st().answerReady.front().size();
+          st().answerReady.pop_front();
+          LOG_ERR("BLE", "answer queue full; dropped the oldest frame");
+        }
       }
       return;
     }
@@ -412,8 +432,9 @@ bool VoiceRelayPeripheral::sendAudioFrame(const uint8_t* coded, size_t len) {
 bool VoiceRelayPeripheral::popAnswer(std::string& out) {
   std::lock_guard<std::mutex> lk(st().mtx);
   if (st().answerReady.empty()) return false;
-  out.swap(st().answerReady);
-  st().answerReady.clear();
+  out = std::move(st().answerReady.front());
+  st().answerReady.pop_front();
+  st().answerQueuedBytes -= st().answerQueuedBytes > out.size() ? out.size() : st().answerQueuedBytes;
   return true;
 }
 
