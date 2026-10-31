@@ -124,6 +124,18 @@ class ConversationSpool {
   // about sessions it has not opened.
   static std::string sessionBackend(const std::string& sessionId);
 
+  // The Muse main chat, mirrored from the voice service. Not a Sticky-created
+  // session: never started, renamed or deleted here, and its contents are a
+  // cache of the service's mirror rather than an independent record.
+  static constexpr const char* kMainSessionId = "main";
+  static bool isMain(const std::string& id) { return id == kMainSessionId; }
+
+  // Formats one record exactly as this class writes them. The Main mirror is
+  // staged by a worker task (src/voice/MainHistory.cpp) and renamed into place,
+  // and it must be byte-compatible with what parseRecord() reads back — so
+  // there is one formatter, not two.
+  static std::string recordLine(Role role, const std::string& text, uint32_t epoch);
+
   bool appendUserTurn(const std::string& text);
   // One streamed agent chunk. The first chunk after a user turn opens the agent
   // turn; later chunks continue it until endAgentTurn().

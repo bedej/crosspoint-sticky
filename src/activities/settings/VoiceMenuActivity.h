@@ -38,7 +38,7 @@ class VoiceMenuActivity final : public UiTabListActivity {
   bool handleHomeGesture() override;
 
  private:
-  enum class AgentRow : uint8_t { Backend, Status, NewConversation, Count };
+  enum class AgentRow : uint8_t { Backend, Status, MainHistory, NewConversation, Count };
   // Font and Size are the conversation's own; the rest are shared with the reader.
   enum class TextRow : uint8_t { Font, Size, LineSpacing, Margin, AllSettings, Count };
   enum class BtRow : uint8_t { Phone, LinkState, Pair, Forget, Count };

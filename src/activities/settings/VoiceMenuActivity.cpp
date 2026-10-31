@@ -18,6 +18,7 @@
 #include "activities/network/AgentVoiceActivity.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/settings/TextSettingsActivity.h"
+#include "activities/transcript/ConversationSpool.h"
 #include "ble/VoiceRelayPeripheral.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
@@ -29,7 +30,8 @@ namespace {
 
 constexpr StrId TAB_NAME_IDS[] = {StrId::STR_AGENT, StrId::STR_TEXT, StrId::STR_BLUETOOTH, StrId::STR_WIFI};
 
-constexpr StrId AGENT_ROW_NAME_IDS[] = {StrId::STR_BACKEND, StrId::STR_STATUS, StrId::STR_NEW_CONVERSATION};
+constexpr StrId AGENT_ROW_NAME_IDS[] = {StrId::STR_BACKEND, StrId::STR_STATUS, StrId::STR_MAIN_HISTORY,
+                                        StrId::STR_NEW_CONVERSATION};
 
 constexpr StrId TEXT_ROW_NAME_IDS[] = {StrId::STR_FONT, StrId::STR_SIZE, StrId::STR_LINE_SPACING,
                                        StrId::STR_SCREEN_MARGIN, StrId::STR_ALL_TEXT_SETTINGS};
@@ -193,6 +195,8 @@ std::string VoiceMenuActivity::agentValueText(const int row) const {
   switch (static_cast<AgentRow>(row)) {
     case AgentRow::Backend:
       return voiceBackend() == VoiceBackend::Muse ? tr(STR_MUSE) : tr(STR_HERMES);
+    case AgentRow::MainHistory:
+      return tr(STR_LOAD_ALL_HISTORY);
     case AgentRow::Status:
       // What the SERVER last said about the chosen backend, not what this device
       // hopes. Unknown is shown as its own thing rather than rounded to Ready:
@@ -219,13 +223,29 @@ void VoiceMenuActivity::confirmAgentRow(const int row) {
     case AgentRow::Backend: {
       const VoiceBackend next = voiceBackend() == VoiceBackend::Muse ? VoiceBackend::Hermes : VoiceBackend::Muse;
       setVoiceBackend(next);
-      // Switching agent starts a new conversation (D6): the thread so far was
-      // addressed to someone else, and carrying it over would ask the new
-      // backend to answer as if it had heard all of it.
-      AgentVoiceActivity::requestNewConversation();
+      if (next == VoiceBackend::Muse) {
+        // Muse means the main chat — the conversation its app opens to and the
+        // one the user has been having on every other device. Not a new thread
+        // (D6), which for Muse would be a side chat nobody else can see.
+        AgentVoiceActivity::requestOpenConversation(ConversationSpool::kMainSessionId);
+      } else {
+        // Switching to Hermes still starts a new conversation (D6): the thread
+        // so far was addressed to someone else, and carrying it over would ask
+        // the new backend to answer as if it had heard all of it.
+        AgentVoiceActivity::requestNewConversation();
+      }
       requestUpdate();
       break;
     }
+    case AgentRow::MainHistory:
+      // The window the device caches is deliberately short. This asks for the
+      // lot: the service widens its own mirror and the device takes as much of
+      // it as it keeps.
+      AgentVoiceActivity::requestHistoryLoad(0);
+      note_ = tr(STR_LOADING_HISTORY);
+      noteUntilMs_ = millis() + 4000;
+      requestUpdate();
+      break;
     case AgentRow::NewConversation:
       // A flag the voice activity consumes from its own loop() — never work
       // done here, where the stack is mid-pop.

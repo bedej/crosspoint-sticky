@@ -47,6 +47,7 @@
 #include "platform/UsbSerialJtagHandoff.h"
 #include "util/ButtonNavigator.h"
 #include "util/ScreenshotUtil.h"
+#include "voice/MainHistory.h"
 #include "voice/VoiceBackend.h"
 
 GfxRenderer renderer(display);
@@ -648,6 +649,26 @@ void loop() {
     lastMemPrint = millis();
   }
 
+  // Device activation (HomeLab-3hv), not "the voice screen was opened": once per
+  // wake, as soon as there is network and Muse is the chosen agent, ask the
+  // voice service to widen its own mirror so paging back has something to page
+  // into. Nothing is downloaded here — the request is short and the work is the
+  // service's — and it runs whatever screen the user is on. A deep-sleep wake is
+  // a reset, so the flag starts false again on every activation.
+  static bool mirrorWidenAsked = false;
+  if (!mirrorWidenAsked && WiFi.status() == WL_CONNECTED && voiceBackend() == VoiceBackend::Muse) {
+    mirrorWidenAsked = true;
+    xTaskCreate(
+        [](void*) {
+          MainHistory::Target to;
+          if (MainHistory::loadTarget(to)) {
+            MainHistory::askServiceToWiden(to, 2000);  // roughly a fortnight of a busy chat
+          }
+          vTaskDelete(nullptr);
+        },
+        "mirrorwiden", 6144, nullptr, 1, nullptr);
+  }
+
   // Handle incoming serial commands,
   // nb: we use logSerial from logging to avoid deprecation warnings
   if (logSerial.available() > 0) {
@@ -732,6 +753,13 @@ void loop() {
         } else {
           logSerial.printf("CRASH_REPORT_NONE\n");
         }
+      } else if (cmd.startsWith("HISTORY")) {
+        // CMD:HISTORY [turns] — load a wider window of the Muse main chat.
+        // 0 or no argument means everything the service can reach. Touch
+        // cannot be injected, so this is the only way to exercise the Agent
+        // tab's History row from outside.
+        const String arg = cmd.length() > 7 ? cmd.substring(7) : String("");
+        AgentVoiceActivity::requestHistoryLoad(static_cast<uint16_t>(arg.toInt()));
       } else if (cmd.startsWith("OPENCONV ")) {
         AgentVoiceActivity::requestOpenConversation(std::string(cmd.substring(9).c_str()));
       } else if (cmd.startsWith("PUTFONT ")) {

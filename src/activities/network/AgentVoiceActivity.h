@@ -18,6 +18,7 @@
 #include <string>
 #include <vector>
 
+#include "../../voice/MainHistory.h"
 #include "activities/Activity.h"
 #include "activities/transcript/ConversationSpool.h"
 #include "activities/transcript/TranscriptView.h"
@@ -64,6 +65,9 @@ class AgentVoiceActivity : public Activity {
   static void requestRailRow(int row) { railRowRequested_ = row; }
   static void requestNewConversation() { newConversationRequested_ = true; }
   static void requestSessionList() { sessionListRequested_ = true; }
+  // Load a wider window of the Muse main chat: the Agent tab's History row and
+  // the CMD:HISTORY hook. 0 means "everything the service can reach".
+  static void requestHistoryLoad(uint16_t turns) { historyRequest_ = turns == 0 ? kHistoryAll : turns; }
   // True while this screen is alive, including when one of its own sub-screens
   // (the menu, the conversation list) sits on top of it — those push rather
   // than replace, so this activity is not exited. Deliberately a static flag
@@ -180,6 +184,24 @@ class AgentVoiceActivity : public Activity {
   // callback that fires while the activity stack is mid-pop panicked the device
   // on exit from Text Settings. The callback now only records what to do.
   enum class Pending : uint8_t { None, Reflow, Session };
+
+  // Sentinel for "load the whole chat" — a tail larger than any real one.
+  static constexpr uint16_t kHistoryAll = 0xFFFF;
+  // What the Main view opens with. Enough to page back through a few days
+  // without making the first open feel like a download.
+  static constexpr uint16_t kMainWindowTurns = 120;
+  // What device activation asks the service to hold, roughly two weeks of a
+  // busy chat. The device does not download this — it only has to be there when
+  // the user pages back.
+  static constexpr uint32_t kActivationBackfillTurns = 2000;
+
+  // Start a fetch of the Main window if one is warranted; `force` re-fetches an
+  // already-populated conversation (the History row).
+  void maybeLoadMainHistory(bool force, uint16_t tail);
+  // Poll the fetch task: progress into the status line, commit when it is ready.
+  void serviceMainHistory();
+  bool onMainConversation() const;
+  MainHistory::Target historyTarget() const;
   void performPendingWork();
 
   void openVoiceMenu();
@@ -204,6 +226,12 @@ class AgentVoiceActivity : public Activity {
   void flushPendingMarker();                // resolve a marker run across deltas
   void finishAnswer();
   void failTurnIfInFlight(const char* msg);  // Listening/Answering -> Idle + error
+
+  static inline volatile uint16_t historyRequest_ = 0;
+  // Progress already shown, so the status line is only rewritten when it moves.
+  uint16_t historyShown_ = 0;
+  // True while this screen is showing a window that a fetch is replacing.
+  bool historyLoading_ = false;
 
   std::string token_;  // shared secret, from SD config — never baked in
   std::string host_;

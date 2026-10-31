@@ -218,6 +218,23 @@ std::string ConversationSpool::sessionBackend(const std::string& sessionId) {
   return static_cast<const char*>(doc["b"] | "");
 }
 
+std::string ConversationSpool::recordLine(const Role role, const std::string& text, const uint32_t epoch) {
+  std::string line;
+  line.reserve(text.size() + 48);
+  line += "{\"r\":\"";
+  line += (role == Role::User) ? 'u' : 'a';
+  line += "\",";
+  if (epoch != 0) {
+    char ts[32];
+    snprintf(ts, sizeof(ts), "\"t\":%lu,", static_cast<unsigned long>(epoch));
+    line += ts;
+  }
+  line += "\"x\":\"";
+  appendJsonEscaped(line, text);
+  line += "\"}\n";
+  return line;
+}
+
 bool ConversationSpool::appendRecord(const Role role, const bool continuation, const std::string& text) {
   if (!open_ || text.empty()) return false;
 

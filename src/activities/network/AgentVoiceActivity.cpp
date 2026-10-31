@@ -680,6 +680,86 @@ void AgentVoiceActivity::applyConversationChoice(const std::string& sessionId) {
   requestUpdate();
 }
 
+bool AgentVoiceActivity::onMainConversation() const { return ConversationSpool::isMain(spool_.sessionId()); }
+
+MainHistory::Target AgentVoiceActivity::historyTarget() const {
+  MainHistory::Target to;
+  to.host = host_;
+  to.port = port_;
+  to.token = token_;
+  return to;
+}
+
+// The Main window is a cache of the service's mirror, so it is refetched rather
+// than repaired: on a first open (nothing cached) and whenever the user asks for
+// more. `fresh=1` makes the service poll Muse first, which is what brings in a
+// turn made in the Muse app a moment ago — and, after a rewrite, brings back the
+// turns taken here that the rewrite discarded.
+void AgentVoiceActivity::maybeLoadMainHistory(const bool force, const uint16_t tail) {
+  if (!onMainConversation() || MainHistory::busy()) return;
+  if (!force && spool_.turnCount() > 0) return;
+  if (host_.empty()) return;  // no service configured; nothing to load from
+  const uint16_t want = tail == kHistoryAll ? 400 : tail;
+  // Asking the service to widen its own mirror costs nothing here: it answers
+  // from what it has and keeps walking back for next time.
+  const uint32_t widen = tail == kHistoryAll ? 20000 : 0;
+  if (MainHistory::start(historyTarget(), want, /*fresh=*/true, widen)) {
+    historyLoading_ = true;
+    historyShown_ = 0;
+    status_ = "Loading history...";
+    view_.setStatus(status_);
+    requestUpdate();
+  }
+}
+
+// Called every loop. The fetch runs on its own task so the user can talk while
+// it downloads; this only moves the status line and swaps the window in when it
+// is complete.
+void AgentVoiceActivity::serviceMainHistory() {
+  if (!historyLoading_) return;
+  const MainHistory::Status st = MainHistory::status();
+
+  if (st.state == MainHistory::State::Working) {
+    if (st.turns != historyShown_) {
+      historyShown_ = st.turns;
+      char line[48];
+      snprintf(line, sizeof(line), "Loading history... %u", static_cast<unsigned>(st.turns));
+      status_ = line;
+      view_.setStatus(status_);
+      requestUpdate();
+    }
+    return;
+  }
+  if (MainHistory::busy()) return;  // finished but the task has not exited yet
+
+  historyLoading_ = false;
+  if (st.state == MainHistory::State::Ready) {
+    // A turn in flight would be writing to the file being replaced.
+    if (state_ == State::Listening || state_ == State::Answering) {
+      historyLoading_ = true;  // try again once the turn is done
+      return;
+    }
+    if (MainHistory::commit()) {
+      spool_.begin(ConversationSpool::kMainSessionId);
+      beginView();
+      view_.restoreIndex();
+      view_.setBackendMark('M');
+      view_.markFullPaint();
+      view_.jumpToLatest();
+      LOG_INF("AVA", "main window in place: %u turns, %u pages", static_cast<unsigned>(spool_.turnCount()),
+              static_cast<unsigned>(spool_.pageCount()));
+    }
+    status_ = "Power to talk";
+  } else if (st.state == MainHistory::State::Failed) {
+    LOG_ERR("AVA", "main history: %s", st.note);
+    status_ = st.note[0] ? st.note : "History unavailable";
+  }
+  MainHistory::clear();
+  view_.setStatus(status_);
+  view_.markFullPaint();
+  requestUpdate();
+}
+
 // Runs from loop(), one iteration after the callback that asked for it — so the
 // "Re-flowing..." / "Opening conversation..." message is already on the panel
 // before the work starts. That is what requestUpdateAndWait() was reaching for,
@@ -732,6 +812,9 @@ void AgentVoiceActivity::performPendingWork() {
   status_ = "Power to talk";
   nextIsPageTurn_ = true;
   requestUpdate();
+
+  // An empty Main view means nothing is cached yet: fill it from the service.
+  maybeLoadMainHistory(/*force=*/false, kMainWindowTurns);
 }
 
 // Checked on ENTRY only, never on a timer: rotating under someone who has just
@@ -1095,6 +1178,13 @@ void AgentVoiceActivity::loop() {
     openVoiceMenu();
     return;
   }
+  if (historyRequest_ != 0) {
+    const uint16_t want = historyRequest_;
+    historyRequest_ = 0;
+    LOG_INF("AVA", "history requested: %u", static_cast<unsigned>(want));
+    maybeLoadMainHistory(/*force=*/true, want);
+  }
+  serviceMainHistory();
   ws_.loop();
   pumpBleAnswers();
   pumpLink();

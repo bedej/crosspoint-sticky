@@ -79,6 +79,14 @@ void ConversationPickerActivity::reload() {
   // yet; the cursor still opens on whichever one is current.
   std::sort(sessions_.begin(), sessions_.end(),
             [](const ConversationSpool::Summary& a, const ConversationSpool::Summary& b) {
+              // The Muse main chat is pinned to the top. It is the conversation
+              // the Muse app opens to, it is shared with every other device on
+              // the account, and it is the one the user means by "the
+              // conversation" — so it does not compete on recency with the
+              // device's own threads.
+              const bool aMain = ConversationSpool::isMain(a.id);
+              const bool bMain = ConversationSpool::isMain(b.id);
+              if (aMain != bMain) return aMain;
               if (a.lastEpoch != b.lastEpoch) return a.lastEpoch > b.lastEpoch;
               return a.id > b.id;
             });
@@ -99,7 +107,14 @@ void ConversationPickerActivity::rebuildRows() {
   const bool haveClock = halClock.nowEpoch(now);
 
   for (const ConversationSpool::Summary& s : sessions_) {
-    labels_.push_back(s.firstQuestion.empty() ? std::string("(no questions yet)") : s.firstQuestion);
+    if (ConversationSpool::isMain(s.id)) {
+      // Named, not summarised: its first question is months old and off the
+      // bottom of whatever window is cached, so quoting it would be a lie
+      // about what opening this row shows.
+      labels_.emplace_back("Main  Â·  Muse");
+    } else {
+      labels_.push_back(s.firstQuestion.empty() ? std::string("(no questions yet)") : s.firstQuestion);
+    }
 
     char age[24] = {0};
     if (haveClock) formatAge(s.lastEpoch, now, age, sizeof(age));
@@ -182,6 +197,10 @@ void ConversationPickerActivity::showDeleteConfirmation(const int index) {
   // Deleting the conversation currently on screen would leave the voice view
   // reading a file that no longer exists.
   if (sessions_[i].id == currentSessionId_) return;
+  // The main chat is a cache of the account's own conversation, not a thread
+  // this device owns: deleting it here would delete nothing (the next open
+  // refetches it) while implying the conversation itself had been removed.
+  if (ConversationSpool::isMain(sessions_[i].id)) return;
 
   confirmingDelete_ = true;
   pendingDeleteRow_ = index;
