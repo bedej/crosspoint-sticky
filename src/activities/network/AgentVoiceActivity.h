@@ -200,6 +200,7 @@ class AgentVoiceActivity : public Activity {
   void maybeLoadMainHistory(bool force, uint16_t tail);
   // Poll the fetch task: progress into the status line, commit when it is ready.
   void serviceMainHistory();
+  void startMainHistoryIfReady();
   bool onMainConversation() const;
   MainHistory::Target historyTarget() const;
   void performPendingWork();
@@ -228,6 +229,12 @@ class AgentVoiceActivity : public Activity {
   void failTurnIfInFlight(const char* msg);  // Listening/Answering -> Idle + error
 
   static inline volatile uint16_t historyRequest_ = 0;
+  // A window this size is wanted but not yet fetched. Opening Main happens
+  // before the association completes — the screen is up in 3 s and Wi-Fi takes
+  // 7 — so the request is held here and retried rather than failed once.
+  uint16_t historyWantTail_ = 0;
+  uint32_t historyRetryAtMs_ = 0;
+  uint8_t historyAttempts_ = 0;
   // Progress already shown, so the status line is only rewritten when it moves.
   uint16_t historyShown_ = 0;
   // True while this screen is showing a window that a fetch is replacing.

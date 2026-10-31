@@ -699,10 +699,27 @@ void AgentVoiceActivity::maybeLoadMainHistory(const bool force, const uint16_t t
   if (!onMainConversation() || MainHistory::busy()) return;
   if (!force && spool_.turnCount() > 0) return;
   if (host_.empty()) return;  // no service configured; nothing to load from
-  const uint16_t want = tail == kHistoryAll ? 400 : tail;
+  historyWantTail_ = tail == 0 ? kMainWindowTurns : tail;
+  historyAttempts_ = 0;
+  historyRetryAtMs_ = 0;
+  startMainHistoryIfReady();
+}
+
+// The fetch needs the network, and opening Main does not wait for it: the screen
+// is up in about three seconds and the association takes about seven. So the
+// want is held and started when there is a route, with a few spaced retries —
+// the first version failed once, printed "service unreachable" and never tried
+// again, which looked exactly like a broken endpoint.
+void AgentVoiceActivity::startMainHistoryIfReady() {
+  if (historyWantTail_ == 0 || historyLoading_ || MainHistory::busy()) return;
+  if (WiFi.status() != WL_CONNECTED) return;
+  const uint32_t now = millis();
+  if (historyRetryAtMs_ != 0 && now < historyRetryAtMs_) return;
+  const uint16_t want = historyWantTail_ == kHistoryAll ? 400 : historyWantTail_;
   // Asking the service to widen its own mirror costs nothing here: it answers
   // from what it has and keeps walking back for next time.
-  const uint32_t widen = tail == kHistoryAll ? 20000 : 0;
+  const uint32_t widen = historyWantTail_ == kHistoryAll ? 20000 : 0;
+  historyAttempts_++;
   if (MainHistory::start(historyTarget(), want, /*fresh=*/true, widen)) {
     historyLoading_ = true;
     historyShown_ = 0;
@@ -716,6 +733,7 @@ void AgentVoiceActivity::maybeLoadMainHistory(const bool force, const uint16_t t
 // it downloads; this only moves the status line and swaps the window in when it
 // is complete.
 void AgentVoiceActivity::serviceMainHistory() {
+  startMainHistoryIfReady();
   if (!historyLoading_) return;
   const MainHistory::Status st = MainHistory::status();
 
@@ -749,10 +767,19 @@ void AgentVoiceActivity::serviceMainHistory() {
       LOG_INF("AVA", "main window in place: %u turns, %u pages", static_cast<unsigned>(spool_.turnCount()),
               static_cast<unsigned>(spool_.pageCount()));
     }
+    historyWantTail_ = 0;  // got it
     status_ = "Power to talk";
   } else if (st.state == MainHistory::State::Failed) {
-    LOG_ERR("AVA", "main history: %s", st.note);
+    LOG_ERR("AVA", "main history: %s (attempt %u)", st.note, static_cast<unsigned>(historyAttempts_));
     status_ = st.note[0] ? st.note : "History unavailable";
+    // Three spread-out tries, then stop: a service that is down stays down for
+    // longer than this screen will wait, and the History row is there to ask
+    // again deliberately.
+    if (historyAttempts_ < 3) {
+      historyRetryAtMs_ = millis() + 5000;
+    } else {
+      historyWantTail_ = 0;
+    }
   }
   MainHistory::clear();
   view_.setStatus(status_);
