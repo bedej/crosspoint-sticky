@@ -467,6 +467,23 @@ void VoiceMenuActivity::activateIndex(const int index) {
 
 bool VoiceMenuActivity::handleCustomInput() { return optionPopup_.isActive(); }
 
+bool VoiceMenuActivity::handleHomeGesture() {
+  // Swipe-up means "home" everywhere, which from here unwound the whole stack
+  // and dropped the user on the main menu — the conversation they opened this
+  // screen from was gone. Dismiss one layer instead: back to that conversation
+  // (or to whatever pushed us), and a second swipe from there still goes home.
+  if (optionPopup_.isActive()) {
+    // Match Back, which the popup also owns: the gesture closes the picker and
+    // goes no further.
+    optionPopup_.dismiss();
+    requestUpdate();
+    return true;
+  }
+  LOG_INF("CONN", "menu closing: home gesture");
+  finish();
+  return true;
+}
+
 bool VoiceMenuActivity::handleButtons() {
   if (optionPopup_.isActive()) return false;  // the popup owns input while it is up
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {

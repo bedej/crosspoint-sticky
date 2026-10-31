@@ -35,6 +35,7 @@ class VoiceMenuActivity final : public UiTabListActivity {
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  bool handleHomeGesture() override;
 
  private:
   enum class AgentRow : uint8_t { Backend, Status, NewConversation, Count };
