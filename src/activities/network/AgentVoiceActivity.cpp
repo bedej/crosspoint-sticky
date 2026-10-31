@@ -713,6 +713,7 @@ void AgentVoiceActivity::maybeLoadMainHistory(const bool force, const uint16_t t
 void AgentVoiceActivity::startMainHistoryIfReady() {
   if (historyWantTail_ == 0 || historyLoading_ || MainHistory::busy()) return;
   if (WiFi.status() != WL_CONNECTED) return;
+  if (state_ == State::Listening || state_ == State::Answering) return;  // the turn comes first
   const uint32_t now = millis();
   if (historyRetryAtMs_ != 0 && now < historyRetryAtMs_) return;
   const uint16_t want = historyWantTail_ == kHistoryAll ? 400 : historyWantTail_;
@@ -733,6 +734,9 @@ void AgentVoiceActivity::startMainHistoryIfReady() {
 // it downloads; this only moves the status line and swaps the window in when it
 // is complete.
 void AgentVoiceActivity::serviceMainHistory() {
+  // The radio is shared with Bluetooth, so the download yields to a live turn
+  // rather than competing with the audio going up.
+  MainHistory::hold(state_ == State::Listening || state_ == State::Answering);
   startMainHistoryIfReady();
   if (!historyLoading_) return;
   const MainHistory::Status st = MainHistory::status();

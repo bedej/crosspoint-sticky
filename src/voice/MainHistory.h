@@ -55,6 +55,14 @@ class MainHistory {
   static Status status();
   static bool busy();
 
+  // Hold the fetch between pages while a turn is in flight, and let it go again
+  // afterwards. Wi-Fi and BLE share one radio on the S3: a sustained HTTP
+  // download during a turn starved the audio going up over Bluetooth to 0.9
+  // seconds in 39, and the service answered "didn't catch that" to a question
+  // it never heard. "Never blocks a turn" has to mean the fetch yields to one,
+  // not merely that it runs on another task.
+  static void hold(bool held);
+
   // Swap the staged window in: removes the Main spool and its index, then
   // renames. UI task only — it replaces files the view has open, so the caller
   // must close the view first and re-open it after.

@@ -34,6 +34,8 @@ struct Shared {
   MainHistory::Status status;
   TaskHandle_t task = nullptr;
   Job job;
+  // Set while a turn is in flight; the worker parks between pages.
+  bool held = false;
 };
 
 Shared& sh() {
@@ -132,8 +134,7 @@ bool fetchFloor(const Job& job, int64_t& floorSeq, bool& empty) {
 // the mirror had nothing more to give.
 bool fetchPage(const Job& job, int64_t& cursor, Staging& out, uint16_t& written, bool& done) {
   char q[96];
-  snprintf(q, sizeof(q), "from_seq=%lld&limit=%u", static_cast<long long>(cursor),
-           static_cast<unsigned>(kPageTurns));
+  snprintf(q, sizeof(q), "from_seq=%lld&limit=%u", static_cast<long long>(cursor), static_cast<unsigned>(kPageTurns));
   std::string body;
   if (!HttpDownloader::fetchUrl(urlFor(job.to, q), body)) {
     setState(MainHistory::State::Failed, "history: transfer failed");
@@ -197,6 +198,23 @@ void worker(void*) {
     bool done = false;
     int64_t cursor = floorSeq;
     while (ok && !done && written < job.tail) {
+      // Park between pages while the user is talking: the radio is shared, and
+      // a page in flight is the thing that starves the audio.
+      bool waited = false;
+      for (;;) {
+        bool held = false;
+        {
+          Lock lk;
+          held = sh().held;
+        }
+        if (!held) break;
+        if (!waited) {
+          waited = true;
+          LOG_INF("MHIST", "holding the fetch while a turn is in flight");
+        }
+        vTaskDelay(pdMS_TO_TICKS(250));
+      }
+      if (waited) LOG_INF("MHIST", "resuming the fetch");
       ok = fetchPage(job, cursor, out, written, done);
     }
     out.close();
@@ -251,6 +269,11 @@ bool MainHistory::start(const Target& to, const uint16_t tail, const bool fresh,
 MainHistory::Status MainHistory::status() {
   Lock lk;
   return sh().status;
+}
+
+void MainHistory::hold(const bool held) {
+  Lock lk;
+  sh().held = held;
 }
 
 bool MainHistory::busy() {
