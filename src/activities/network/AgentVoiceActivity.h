@@ -239,6 +239,9 @@ class AgentVoiceActivity : public Activity {
   uint16_t historyShown_ = 0;
   // True while this screen is showing a window that a fetch is replacing.
   bool historyLoading_ = false;
+  // Set when the window has been committed and the (multi-second) layout must
+  // run on the NEXT loop, so the message saying so is already on the panel.
+  bool historyLayoutPending_ = false;
 
   std::string token_;  // shared secret, from SD config — never baked in
   std::string host_;

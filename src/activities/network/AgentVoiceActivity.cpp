@@ -724,7 +724,7 @@ void AgentVoiceActivity::startMainHistoryIfReady() {
   if (MainHistory::start(historyTarget(), want, /*fresh=*/true, widen)) {
     historyLoading_ = true;
     historyShown_ = 0;
-    status_ = "Loading history...";
+    status_ = tr(STR_LOADING_HISTORY);
     view_.setStatus(status_);
     requestUpdate();
   }
@@ -737,6 +737,23 @@ void AgentVoiceActivity::serviceMainHistory() {
   // The radio is shared with Bluetooth, so the download yields to a live turn
   // rather than competing with the audio going up.
   MainHistory::hold(state_ == State::Listening || state_ == State::Answering);
+
+  if (historyLayoutPending_) {
+    historyLayoutPending_ = false;
+    historyLoading_ = false;
+    historyWantTail_ = 0;
+    beginView();
+    view_.restoreIndex();
+    view_.setBackendMark('M');
+    view_.markFullPaint();
+    view_.jumpToLatest();
+    LOG_INF("AVA", "main window in place: %u turns, %u pages", static_cast<unsigned>(spool_.turnCount()),
+            static_cast<unsigned>(spool_.pageCount()));
+    status_ = "Power to talk";
+    view_.setStatus(status_);
+    requestUpdate();
+    return;
+  }
   startMainHistoryIfReady();
   if (!historyLoading_) return;
   const MainHistory::Status st = MainHistory::status();
@@ -744,8 +761,8 @@ void AgentVoiceActivity::serviceMainHistory() {
   if (st.state == MainHistory::State::Working) {
     if (st.turns != historyShown_) {
       historyShown_ = st.turns;
-      char line[48];
-      snprintf(line, sizeof(line), "Loading history... %u", static_cast<unsigned>(st.turns));
+      char line[64];
+      snprintf(line, sizeof(line), tr(STR_LOADING_HISTORY_N), static_cast<unsigned>(st.turns));
       status_ = line;
       view_.setStatus(status_);
       requestUpdate();
@@ -762,14 +779,21 @@ void AgentVoiceActivity::serviceMainHistory() {
       return;
     }
     if (MainHistory::commit()) {
+      // Laying out a few hundred turns takes seconds on the first open (the
+      // index is then saved, so later opens are tens of milliseconds). Put that
+      // on screen BEFORE doing it, one loop earlier, the way the re-flow and
+      // conversation-switch paths do: an unexplained pause on a screen that was
+      // just downloading reads as a hang.
       spool_.begin(ConversationSpool::kMainSessionId);
-      beginView();
-      view_.restoreIndex();
-      view_.setBackendMark('M');
+      char line[64];
+      snprintf(line, sizeof(line), tr(STR_LAYING_OUT_HISTORY), static_cast<unsigned>(spool_.turnCount()));
+      status_ = line;
+      view_.setStatus(status_);
       view_.markFullPaint();
-      view_.jumpToLatest();
-      LOG_INF("AVA", "main window in place: %u turns, %u pages", static_cast<unsigned>(spool_.turnCount()),
-              static_cast<unsigned>(spool_.pageCount()));
+      historyLayoutPending_ = true;
+      MainHistory::clear();
+      requestUpdate();
+      return;
     }
     historyWantTail_ = 0;  // got it
     status_ = "Power to talk";
