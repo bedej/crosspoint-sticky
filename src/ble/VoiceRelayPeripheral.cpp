@@ -439,7 +439,15 @@ bool VoiceRelayPeripheral::isBonded() const {
   return st().bonded && st().encrypted;
 }
 
-int VoiceRelayPeripheral::bondCount() const { return NimBLEDevice::getNumBonds(); }
+int VoiceRelayPeripheral::bondCount() const {
+  // Reaches into the NimBLE host, which asserts on a null mutex handle when the
+  // host was never started (npl_freertos_mutex_pend) — a panic and reboot, not
+  // an error return. The voice screen is the only thing that calls begin(), so
+  // any caller before it has run lands here; see forgetBonds() for the same
+  // guard. 0 is also what the no-BLE build reports.
+  if (!NimBLEDevice::isInitialized()) return 0;
+  return NimBLEDevice::getNumBonds();
+}
 
 void VoiceRelayPeripheral::forgetBonds() {
   // Guard rather than trust the caller: this reaches into the NimBLE host, and

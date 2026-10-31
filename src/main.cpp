@@ -802,9 +802,11 @@ void loop() {
         VoiceRelayPeripheral::instance().forgetBonds();
       } else if (cmd == "BLESTATE") {
         auto& ble = VoiceRelayPeripheral::instance();
-        LOG_INF("BLE", "state: supported=%d connected=%d streaming=%d bonded=%d bonds=%d window=%d phone='%s'",
-                (int)VoiceRelayPeripheral::supported(), (int)ble.isConnected(), (int)ble.isStreaming(),
-                (int)ble.isBonded(), ble.bondCount(), (int)ble.isPairingWindowOpen(), ble.linkState().c_str());
+        LOG_INF("BLE",
+                "state: supported=%d running=%d connected=%d streaming=%d bonded=%d bonds=%d window=%d phone='%s'",
+                (int)VoiceRelayPeripheral::supported(), (int)ble.isRunning(), (int)ble.isConnected(),
+                (int)ble.isStreaming(), (int)ble.isBonded(), ble.bondCount(), (int)ble.isPairingWindowOpen(),
+                ble.linkState().c_str());
       }
     }
   }
