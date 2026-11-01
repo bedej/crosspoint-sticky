@@ -40,6 +40,13 @@ std::vector<std::string> ConversationSpool::listSessionIds() {
   return ids;
 }
 
+uint32_t ConversationSpool::sessionBytes(const std::string& id) {
+  const std::string path = std::string(kSessionDir) + "/" + id + ".jsonl";
+  HalFile f;
+  if (!Storage.openFileForRead("SPOOL", path.c_str(), f) || !f) return 0;
+  return static_cast<uint32_t>(f.size());
+}
+
 bool ConversationSpool::eraseSession(const std::string& id) {
   const std::string base = std::string(kSessionDir) + "/" + id;
   const bool spool = Storage.remove((base + ".jsonl").c_str());

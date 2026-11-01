@@ -75,11 +75,22 @@ void ConversationPickerActivity::reload() {
   // they pile up in front of the real conversations — seven of them after an
   // afternoon of reflashing. The current one stays however empty it is: it is
   // the one on screen, and "New conversation" has just made it on purpose.
+  // A conversation that has never been spoken in holds only its metadata
+  // record — tens of bytes. Anything larger has content, whatever the index
+  // says about it.
+  constexpr uint32_t kEmptySpoolBytes = 256;
   size_t pruned = 0;
   sessions_.erase(std::remove_if(sessions_.begin(), sessions_.end(),
                                  [&](const ConversationSpool::Summary& s) {
                                    if (s.turnCount > 0 || s.id == currentSessionId_) return false;
                                    if (ConversationSpool::isMain(s.id)) return false;
+                                   // A Summary's turn count comes from the index,
+                                   // and an index is absent or rejected whenever
+                                   // its format changes — as it just did. Deleting
+                                   // on that alone would have thrown away every
+                                   // real conversation on the first boot after an
+                                   // index version bump, so the file decides.
+                                   if (ConversationSpool::sessionBytes(s.id) > kEmptySpoolBytes) return false;
                                    ConversationSpool::eraseSession(s.id);
                                    pruned++;
                                    return true;

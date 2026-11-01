@@ -107,6 +107,12 @@ class ConversationSpool {
   static std::vector<std::string> listSessionIds();
   static bool readSummary(const std::string& id, Summary& out);
   static bool eraseSession(const std::string& id);
+
+  // Bytes in a conversation's spool file, 0 if it is missing. The turn count in
+  // a Summary comes from the index, which is absent or rejected whenever the
+  // index format changes — so anything that decides a conversation is empty has
+  // to ask the file, not the summary.
+  static uint32_t sessionBytes(const std::string& id);
   static const char* sessionDir();
 
   ConversationSpool() = default;
