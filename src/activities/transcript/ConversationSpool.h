@@ -59,7 +59,12 @@ class ConversationSpool {
     uint32_t epoch = 0;   // 0 when the clock could not be trusted
     uint16_t turnIndex = 0;
     uint8_t role = 0;
-    char snippet[21] = {0};  // first words, NUL-terminated
+    // First words, NUL-terminated. 60 bytes, not 20: at 20 the picker showed
+    // "What is the melting" for "What is the melting point of tungsten?" and no
+    // amount of layout width could help, because this record is fixed-size so
+    // the turn table can be read by seek (HomeLab-85s). Consumers that have
+    // less room wrap it — the rail takes one wrapped line.
+    char snippet[61] = {0};
   };
   static constexpr size_t kMaxTurnRefs = 2000;
 

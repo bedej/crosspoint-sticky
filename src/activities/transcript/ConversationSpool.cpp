@@ -498,7 +498,10 @@ namespace {
 // Bumped whenever the on-disk layout below changes, so a stale file is
 // rejected rather than misread.
 constexpr uint32_t kIndexMagic = 0x58444953;  // "SIDX"
-constexpr uint8_t kIndexVersion = 2;          // v2 adds the turn table
+// v2 added the turn table; v3 widened TurnRef::snippet from 20 bytes to 60.
+// A version bump is what keeps a wider record from being read against an older
+// index: every .idx written before this is rejected and rebuilt on first open.
+constexpr uint8_t kIndexVersion = 3;
 // Page breaks by pixel height (turn gaps narrower than a line). Not a version
 // bump: readSummary() rejects other versions, which would blank every picker row.
 constexpr uint8_t kLayoutRev = 1;
