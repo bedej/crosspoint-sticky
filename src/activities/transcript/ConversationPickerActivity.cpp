@@ -111,7 +111,7 @@ void ConversationPickerActivity::rebuildRows() {
       // Named, not summarised: its first question is months old and off the
       // bottom of whatever window is cached, so quoting it would be a lie
       // about what opening this row shows.
-      labels_.emplace_back("Main  Â·  Muse");
+      labels_.emplace_back("Main  \xc2\xb7  Muse");
     } else {
       labels_.push_back(s.firstQuestion.empty() ? std::string("(no questions yet)") : s.firstQuestion);
     }
@@ -122,7 +122,11 @@ void ConversationPickerActivity::rebuildRows() {
     // Which agent this conversation belongs to, as a single letter (HomeLab-cuq).
     // Conversations started before the backend was recorded carry no mark rather
     // than being assumed to be Hermes — they predate the question.
-    const std::string backend = ConversationSpool::sessionBackend(s.id);
+    // The mirror carries no metadata record to read a backend from, and it is
+    // Muse's chat by definition — so mark it, rather than leaving the one row
+    // that is certainly Muse as the only unmarked one.
+    const std::string backend =
+        ConversationSpool::isMain(s.id) ? std::string("muse") : ConversationSpool::sessionBackend(s.id);
     char mark[8] = {0};
     if (backend == "muse") {
       snprintf(mark, sizeof(mark), "M \xc2\xb7 ");
