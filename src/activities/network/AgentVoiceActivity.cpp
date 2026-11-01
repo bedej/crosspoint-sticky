@@ -697,11 +697,28 @@ MainHistory::Target AgentVoiceActivity::historyTarget() const {
 // turns taken here that the rewrite discarded.
 void AgentVoiceActivity::maybeLoadMainHistory(const bool force, const uint16_t tail) {
   if (!onMainConversation() || MainHistory::busy()) return;
-  if (!force && spool_.turnCount() > 0) return;
   if (host_.empty()) return;  // no service configured; nothing to load from
-  historyWantTail_ = tail == 0 ? kMainWindowTurns : tail;
   historyAttempts_ = 0;
   historyRetryAtMs_ = 0;
+  historyCatchUpSince_ = 0;
+
+  // A cache that is merely behind is caught up by APPENDING what is past it,
+  // not by refetching the window: the saved page index survives an append, so
+  // the conversation stays open in tens of milliseconds rather than laying
+  // hundreds of turns out again. This is the path that brings in a turn made in
+  // the Muse app on another device.
+  if (!force && spool_.turnCount() > 0) {
+    MainHistory::Mark mark;
+    if (MainHistory::readMark(mark)) {
+      historyWantTail_ = 0;
+      historyCatchUpSince_ = mark.seq;
+      startMainHistoryIfReady();
+      return;
+    }
+    // Cached by a build that kept no mark. One window refetch writes one.
+    LOG_INF("AVA", "main cache carries no mark; refetching the window once");
+  }
+  historyWantTail_ = tail == 0 ? kMainWindowTurns : tail;
   startMainHistoryIfReady();
 }
 
@@ -711,11 +728,25 @@ void AgentVoiceActivity::maybeLoadMainHistory(const bool force, const uint16_t t
 // the first version failed once, printed "service unreachable" and never tried
 // again, which looked exactly like a broken endpoint.
 void AgentVoiceActivity::startMainHistoryIfReady() {
-  if (historyWantTail_ == 0 || historyLoading_ || MainHistory::busy()) return;
+  if (historyWantTail_ == 0 && historyCatchUpSince_ == 0) return;
+  if (historyLoading_ || MainHistory::busy()) return;
   if (WiFi.status() != WL_CONNECTED) return;
   if (state_ == State::Listening || state_ == State::Answering) return;  // the turn comes first
   const uint32_t now = millis();
   if (historyRetryAtMs_ != 0 && now < historyRetryAtMs_) return;
+
+  if (historyCatchUpSince_ != 0) {
+    historyAttempts_++;
+    // No status line yet. A catch-up that finds nothing new is the common case
+    // and should look like nothing happened; progress appears below only once
+    // turns actually start arriving.
+    if (MainHistory::startCatchUp(historyTarget(), historyCatchUpSince_)) {
+      historyLoading_ = true;
+      historyShown_ = 0;
+    }
+    return;
+  }
+
   const uint16_t want = historyWantTail_ == kHistoryAll ? 400 : historyWantTail_;
   // Asking the service to widen its own mirror costs nothing here: it answers
   // from what it has and keeps walking back for next time.
@@ -747,7 +778,7 @@ void AgentVoiceActivity::serviceMainHistory() {
     view_.setBackendMark('M');
     view_.markFullPaint();
     view_.jumpToLatest();
-    LOG_INF("AVA", "main window in place: %u turns, %u pages", static_cast<unsigned>(spool_.turnCount()),
+    LOG_INF("AVA", "main view in place: %u turns, %u pages", static_cast<unsigned>(spool_.turnCount()),
             static_cast<unsigned>(spool_.pageCount()));
     status_ = tr(STR_POWER_TO_TALK);
     view_.setStatus(status_);
@@ -772,6 +803,48 @@ void AgentVoiceActivity::serviceMainHistory() {
   if (MainHistory::busy()) return;  // finished but the task has not exited yet
 
   historyLoading_ = false;
+
+  // A catch-up appends, so it keeps the cache and its page index; only the new
+  // turns are laid out. It gives way to the window path whenever appending
+  // would not be sound — the refetch is correct at any distance.
+  if (st.catchUp) {
+    if (state_ == State::Listening || state_ == State::Answering) {
+      historyLoading_ = true;  // the spool is being written; apply after the turn
+      return;
+    }
+    uint16_t added = 0;
+    const bool applied =
+        st.state == MainHistory::State::Ready && st.turns > 0 && MainHistory::applyCatchUp(spool_, added);
+    if (st.state == MainHistory::State::Ready && (st.turns == 0 || (applied && added == 0))) {
+      // Nothing new, or nothing new that was not already here. Say nothing: the
+      // conversation is on screen and unchanged.
+      historyCatchUpSince_ = 0;
+      MainHistory::clear();
+      return;
+    }
+    if (applied) {
+      char line[64];
+      snprintf(line, sizeof(line), tr(STR_NEW_TURNS_N), static_cast<unsigned>(added));
+      status_ = line;
+      view_.setStatus(status_);
+      view_.markFullPaint();
+      spool_.begin(ConversationSpool::kMainSessionId);  // re-scan the turns that were appended
+      historyCatchUpSince_ = 0;
+      historyLayoutPending_ = true;
+      MainHistory::clear();
+      requestUpdate();
+      return;
+    }
+    LOG_INF("AVA", "catch-up gave way to a window refetch (%s)", st.note[0] ? st.note : "could not append");
+    MainHistory::clear();
+    historyCatchUpSince_ = 0;
+    historyAttempts_ = 0;
+    historyRetryAtMs_ = 0;
+    historyWantTail_ = kMainWindowTurns;
+    startMainHistoryIfReady();
+    return;
+  }
+
   if (st.state == MainHistory::State::Ready) {
     // A turn in flight would be writing to the file being replaced.
     if (state_ == State::Listening || state_ == State::Answering) {

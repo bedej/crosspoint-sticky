@@ -233,6 +233,9 @@ class AgentVoiceActivity : public Activity {
   // before the association completes — the screen is up in 3 s and Wi-Fi takes
   // 7 — so the request is held here and retried rather than failed once.
   uint16_t historyWantTail_ = 0;
+  // Non-zero while a catch-up is wanted or in flight: the mirror seq the cache
+  // already holds, which is what the append fetches past.
+  int64_t historyCatchUpSince_ = 0;
   uint32_t historyRetryAtMs_ = 0;
   uint8_t historyAttempts_ = 0;
   // Progress already shown, so the status line is only rewritten when it moves.
