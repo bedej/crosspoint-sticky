@@ -70,6 +70,23 @@ void ConversationPickerActivity::reload() {
     sessions_.push_back(std::move(summary));
   }
 
+  // Drop the empties. A wake that finds the last conversation cold rotates to a
+  // fresh one, so every wake with nothing said leaves a 0-turn file behind, and
+  // they pile up in front of the real conversations — seven of them after an
+  // afternoon of reflashing. The current one stays however empty it is: it is
+  // the one on screen, and "New conversation" has just made it on purpose.
+  size_t pruned = 0;
+  sessions_.erase(std::remove_if(sessions_.begin(), sessions_.end(),
+                                 [&](const ConversationSpool::Summary& s) {
+                                   if (s.turnCount > 0 || s.id == currentSessionId_) return false;
+                                   if (ConversationSpool::isMain(s.id)) return false;
+                                   ConversationSpool::eraseSession(s.id);
+                                   pruned++;
+                                   return true;
+                                 }),
+                  sessions_.end());
+  if (pruned > 0) LOG_INF("CPICK", "pruned %u empty conversations", static_cast<unsigned>(pruned));
+
   // Most recently SPOKEN IN first, which is not the same as most recently
   // created — resuming an old conversation should float it back to the top.
   //
