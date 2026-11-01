@@ -190,6 +190,9 @@ class AgentVoiceActivity : public Activity {
   // What the Main view opens with. Enough to page back through a few days
   // without making the first open feel like a download.
   static constexpr uint16_t kMainWindowTurns = 120;
+  // What "load all" asks for, and the ceiling on a refetch that is preserving
+  // a window the user already widened. MainHistory clamps to the same number.
+  static constexpr uint16_t kMainWindowMax = 400;
   // What device activation asks the service to hold, roughly two weeks of a
   // busy chat. The device does not download this — it only has to be there when
   // the user pages back.
@@ -201,6 +204,7 @@ class AgentVoiceActivity : public Activity {
   // Poll the fetch task: progress into the status line, commit when it is ready.
   void serviceMainHistory();
   void startMainHistoryIfReady();
+  uint16_t refetchTail() const;
   bool onMainConversation() const;
   MainHistory::Target historyTarget() const;
   void performPendingWork();

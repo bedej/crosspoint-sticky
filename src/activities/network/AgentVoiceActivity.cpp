@@ -10,6 +10,8 @@
 #include <driver/gpio.h>
 #include <esp_system.h>
 
+#include <algorithm>
+
 #include "CrossPointSettings.h"
 #include "SdCardFontSystem.h"
 #include "WifiCredentialStore.h"
@@ -718,8 +720,16 @@ void AgentVoiceActivity::maybeLoadMainHistory(const bool force, const uint16_t t
     // Cached by a build that kept no mark. One window refetch writes one.
     LOG_INF("AVA", "main cache carries no mark; refetching the window once");
   }
-  historyWantTail_ = tail == 0 ? kMainWindowTurns : tail;
+  historyWantTail_ = tail == 0 ? refetchTail() : tail;
   startMainHistoryIfReady();
+}
+
+// A window refetch REPLACES the cache, so asking for the default 120 after the
+// user has loaded 400 would quietly throw 280 turns of scrollback away. Ask for
+// at least what is already here.
+uint16_t AgentVoiceActivity::refetchTail() const {
+  const uint16_t held = std::min<uint16_t>(spool_.turnCount(), kMainWindowMax);
+  return std::max(kMainWindowTurns, held);
 }
 
 // The fetch needs the network, and opening Main does not wait for it: the screen
@@ -747,7 +757,7 @@ void AgentVoiceActivity::startMainHistoryIfReady() {
     return;
   }
 
-  const uint16_t want = historyWantTail_ == kHistoryAll ? 400 : historyWantTail_;
+  const uint16_t want = historyWantTail_ == kHistoryAll ? kMainWindowMax : historyWantTail_;
   // Asking the service to widen its own mirror costs nothing here: it answers
   // from what it has and keeps walking back for next time.
   const uint32_t widen = historyWantTail_ == kHistoryAll ? 20000 : 0;
@@ -840,7 +850,7 @@ void AgentVoiceActivity::serviceMainHistory() {
     historyCatchUpSince_ = 0;
     historyAttempts_ = 0;
     historyRetryAtMs_ = 0;
-    historyWantTail_ = kMainWindowTurns;
+    historyWantTail_ = refetchTail();
     startMainHistoryIfReady();
     return;
   }
@@ -942,7 +952,7 @@ void AgentVoiceActivity::performPendingWork() {
   requestUpdate();
 
   // An empty Main view means nothing is cached yet: fill it from the service.
-  maybeLoadMainHistory(/*force=*/false, kMainWindowTurns);
+  maybeLoadMainHistory(/*force=*/false, 0);
 }
 
 // Checked on ENTRY only, never on a timer: rotating under someone who has just
