@@ -278,7 +278,7 @@ void AgentVoiceActivity::onEnter() {
 
   if (!loadConfig()) {
     state_ = State::Error;
-    status_ = "Add /.crosspoint/voice.json with a \"token\" (see VOICE.md).";
+    status_ = tr(STR_VOICE_NEEDS_CONFIG);
     requestUpdate();
     return;
   }
@@ -296,7 +296,7 @@ void AgentVoiceActivity::onEnter() {
   if (!mic_.begin(16000)) {
     LOG_ERR("AVA", "mic begin failed");
     state_ = State::Error;
-    status_ = "Mic init failed";
+    status_ = tr(STR_MIC_INIT_FAILED);
     requestUpdate();
     return;
   }
@@ -328,7 +328,7 @@ void AgentVoiceActivity::onEnter() {
 
   // Paint the restored conversation NOW, then bring the link up behind it.
   state_ = State::Idle;
-  status_ = "Power to talk";
+  status_ = tr(STR_POWER_TO_TALK);
   requestUpdateAndWait();
 
   startWifi();
@@ -419,7 +419,7 @@ void AgentVoiceActivity::startListening() {
   state_ = State::Listening;
   // Same button that started it: talk is bound to Confirm/Power on GPIO4, and Up
   // has never stopped a turn. The label said otherwise from the first version.
-  status_ = "Listening... (Power to stop)";
+  status_ = tr(STR_LISTENING_STOP);
   LOG_INF("AVA", "listen start (ws=%d)", (int)wsConnected_);
   markDirty();
 }
@@ -454,7 +454,7 @@ void AgentVoiceActivity::stopListening() {
     sendTurnEnd();
   }
   state_ = State::Answering;
-  status_ = "Thinking...";
+  status_ = tr(STR_THINKING);
   lastServerMs_ = millis();  // arm the stall watchdog
   markDirty();
 }
@@ -555,7 +555,7 @@ void AgentVoiceActivity::openVoiceMenu() {
                              requestUpdate();
                              return;
                            }
-                           status_ = "Re-flowing the conversation...";
+                           status_ = tr(STR_REFLOWING_CONVERSATION);
                            view_.setStatus(status_);
                            view_.markFullPaint();
                            pending_ = Pending::Reflow;
@@ -674,7 +674,7 @@ void AgentVoiceActivity::applyConversationChoice(const std::string& sessionId) {
   // rebuilds it — seconds of work that must not run during activity teardown.
   pendingSessionId_ = sessionId;
   pending_ = Pending::Session;
-  status_ = "Opening conversation...";
+  status_ = tr(STR_OPENING_CONVERSATION);
   view_.setStatus(status_);
   view_.markFullPaint();
   requestUpdate();
@@ -749,7 +749,7 @@ void AgentVoiceActivity::serviceMainHistory() {
     view_.jumpToLatest();
     LOG_INF("AVA", "main window in place: %u turns, %u pages", static_cast<unsigned>(spool_.turnCount()),
             static_cast<unsigned>(spool_.pageCount()));
-    status_ = "Power to talk";
+    status_ = tr(STR_POWER_TO_TALK);
     view_.setStatus(status_);
     requestUpdate();
     return;
@@ -796,10 +796,10 @@ void AgentVoiceActivity::serviceMainHistory() {
       return;
     }
     historyWantTail_ = 0;  // got it
-    status_ = "Power to talk";
+    status_ = tr(STR_POWER_TO_TALK);
   } else if (st.state == MainHistory::State::Failed) {
     LOG_ERR("AVA", "main history: %s (attempt %u)", st.note, static_cast<unsigned>(historyAttempts_));
-    status_ = st.note[0] ? st.note : "History unavailable";
+    status_ = st.note[0] ? st.note : tr(STR_HISTORY_UNAVAILABLE);
     // Three spread-out tries, then stop: a service that is down stays down for
     // longer than this screen will wait, and the History row is there to ask
     // again deliberately.
@@ -864,7 +864,7 @@ void AgentVoiceActivity::performPendingWork() {
   LOG_INF("AVA", "session %s: %u turns, %u pages", spool_.sessionId().c_str(),
           static_cast<unsigned>(spool_.turnCount()), static_cast<unsigned>(spool_.pageCount()));
 
-  status_ = "Power to talk";
+  status_ = tr(STR_POWER_TO_TALK);
   nextIsPageTurn_ = true;
   requestUpdate();
 
@@ -1267,7 +1267,7 @@ void AgentVoiceActivity::loop() {
     turnTransport_ = Transport::None;
     view_.clearDraft();
     state_ = State::Idle;
-    status_ = "No response. Press Up to try again.";
+    status_ = tr(STR_NO_RESPONSE_RETRY);
     requestUpdate(true);
     return;
   }
@@ -1345,7 +1345,7 @@ void AgentVoiceActivity::finishAnswer() {
   // An errored turn keeps the server's message: answer.done arrives a few
   // milliseconds after the error, and resetting here overwrote it before the
   // panel had finished the refresh that would have shown it.
-  if (!turnFailed_) status_ = "Power to talk";
+  if (!turnFailed_) status_ = tr(STR_POWER_TO_TALK);
   dirty_ = false;
   lastRenderMs_ = 0;
   requestUpdate(true);  // one clean full-ish refresh at the end
